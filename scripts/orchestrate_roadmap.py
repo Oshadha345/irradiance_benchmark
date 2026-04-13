@@ -204,6 +204,48 @@ def resolve_input_image(dataset: str) -> str:
     return os.environ.get(env_name, DEFAULT_ERF_IMAGES[dataset])
 
 
+def parse_visible_physical_gpus() -> list[int] | None:
+    raw = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if raw is None or not raw.strip():
+        return None
+    tokens = [token.strip() for token in raw.split(",") if token.strip()]
+    if not tokens:
+        return None
+    visible: list[int] = []
+    for token in tokens:
+        if not token.isdigit():
+            return None
+        visible.append(int(token))
+    return visible or None
+
+
+def resolve_gpu_request(requested_gpu_index: int) -> tuple[int, int]:
+    visible_physical = parse_visible_physical_gpus()
+    if visible_physical:
+        if requested_gpu_index in visible_physical:
+            return requested_gpu_index, visible_physical.index(requested_gpu_index)
+        if 0 <= requested_gpu_index < len(visible_physical):
+            physical_gpu_index = visible_physical[requested_gpu_index]
+            print(
+                f"[gpu] treating requested gpu_index={requested_gpu_index} as a logical visible index "
+                f"within CUDA_VISIBLE_DEVICES={','.join(str(value) for value in visible_physical)}; "
+                f"physical_gpu={physical_gpu_index}"
+            )
+            return physical_gpu_index, requested_gpu_index
+        raise RuntimeError(
+            f"Requested gpu_index={requested_gpu_index}, but CUDA_VISIBLE_DEVICES exposes "
+            f"physical GPU(s) {visible_physical}. Use one of those physical indices or a logical index "
+            f"between 0 and {len(visible_physical) - 1}."
+        )
+
+    visible_count = torch.cuda.device_count()
+    if requested_gpu_index < 0 or requested_gpu_index >= visible_count:
+        raise RuntimeError(
+            f"Requested gpu_index={requested_gpu_index}, but only {visible_count} CUDA device(s) are visible."
+        )
+    return requested_gpu_index, requested_gpu_index
+
+
 def compute_time_budget(
     *,
     deadline: datetime,
@@ -672,14 +714,15 @@ def main() -> None:
     deadline = datetime.now() + timedelta(hours=float(args.budget_hours))
     if not torch.cuda.is_available():
         raise RuntimeError("The roadmap orchestrator expects a CUDA device.")
-    if args.gpu_index < 0 or args.gpu_index >= torch.cuda.device_count():
-        raise RuntimeError(
-            f"Requested gpu_index={args.gpu_index}, but only {torch.cuda.device_count()} CUDA device(s) are visible."
-        )
-    torch.cuda.set_device(args.gpu_index)
-    device = torch.device(f"cuda:{args.gpu_index}")
+    physical_gpu_index, visible_gpu_index = resolve_gpu_request(args.gpu_index)
+    torch.cuda.set_device(visible_gpu_index)
+    device = torch.device(f"cuda:{visible_gpu_index}")
+    print(
+        f"[gpu] requested={args.gpu_index} physical={physical_gpu_index} visible={visible_gpu_index} "
+        f"cuda_visible_devices={os.environ.get('CUDA_VISIBLE_DEVICES') or '<all>'}"
+    )
 
-    with exclusive_gpu(args.gpu_index):
+    with exclusive_gpu(physical_gpu_index):
         os.environ.setdefault("PYTHONNOUSERSITE", "1")
         for index, spec in enumerate(pending, start=1):
             base_config = load_config(spec.config_path)
@@ -716,7 +759,7 @@ def main() -> None:
                         raise FileNotFoundError(f"Saved run directory no longer exists: {run_dir}")
                     run_config_path = resolve_run_config_path(run_dir, fallback=spec.config_path)
                     env = os.environ.copy()
-                    env["CUDA_VISIBLE_DEVICES"] = str(args.gpu_index)
+                    env["CUDA_VISIBLE_DEVICES"] = str(physical_gpu_index)
                     env["PYTHONNOUSERSITE"] = env.get("PYTHONNOUSERSITE", "1")
                     input_image = resolve_input_image(spec.dataset)
                     run_command(
@@ -757,7 +800,7 @@ def main() -> None:
                 profile = tuned["profile"]
 
                 env = os.environ.copy()
-                env["CUDA_VISIBLE_DEVICES"] = str(args.gpu_index)
+                env["CUDA_VISIBLE_DEVICES"] = str(physical_gpu_index)
                 env["PYTHONNOUSERSITE"] = env.get("PYTHONNOUSERSITE", "1")
                 train_started_at = time.time()
                 run_command(
