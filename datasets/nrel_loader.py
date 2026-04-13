@@ -1,0 +1,176 @@
+# Data loader for NREL dataset
+
+import os
+import pandas as pd
+import numpy as np
+import torch
+import pickle
+from torch.utils.data import Dataset, DataLoader
+from torchvision import transforms
+from PIL import Image, ImageDraw, ImageFile
+import pvlib
+from datetime import datetime, timedelta
+import hashlib
+import json
+from tqdm import tqdm
+
+ImageFile.LOAD_TRUNCATED_IMAGES = True
+
+class SolarDataset(Dataset):
+    def __init__(self, config, transform=None):
+        self.config = config
+        self.transform = transform
+        self.root_dir = config['data']['server_root'] if config['env'] == 'server' else config['data']['local_root']
+        self.sequence_length, self.sampling_rate = config['data']['sequence_length'], config['data']['sampling_rate_sec']
+        self.horizons = config['model']['horizons'] 
+        self.csv_path = config['data'].get('csv_path')
+        self.image_root = config['data'].get('image_root')
+        self.use_aux = config['model'].get('use_aux_decoder', False)
+
+        self.df = self._load_all_data()
+        if config['data'].get('years'): self.df = self.df[self.df.index.year.isin(config['data']['years'])]
+
+        # NREL Coordinates
+        self.lat, self.lon, self.alt = 39.742, -105.178, 1828.8 
+        self.df = self._add_solar_physics(self.df, self.lat, self.lon, self.alt)
+        self.df = self.df[self.df['SZA'] <= 85]
+
+        self.feature_cols = ['k_index', 'temperature', 'pressure', 'SZA', 'Azimuth', 'sin_hour', 'cos_hour']
+        self.mean, self.std = self.df[self.feature_cols].mean(), self.df[self.feature_cols].std()
+        cols_to_norm = ['k_index', 'temperature', 'pressure', 'SZA', 'Azimuth']
+        self.df[cols_to_norm] = (self.df[cols_to_norm] - self.mean[cols_to_norm]) / (self.std[cols_to_norm] + 1e-6)
+
+        self.samples = self._match_images()
+
+    def _load_all_data(self):
+        df = pd.read_csv(self.csv_path)
+        col = 'Datetime' if 'Datetime' in df.columns else 'Date'
+        try: df['Datetime'] = pd.to_datetime(df[col], format='%m/%d/%Y %H:%M')
+        except: df['Datetime'] = pd.to_datetime(df[col], infer_datetime_format=True)
+        master_df = df.sort_values('Datetime').set_index('Datetime')
+        for c in ['GHI', 'DNI', 'DHI', 'temperature', 'pressure']: master_df[c] = pd.to_numeric(master_df[c], errors='coerce')
+        return master_df.dropna()
+
+    def _add_solar_physics(self, df, lat, lon, alt):
+        site = pvlib.location.Location(lat, lon, altitude=alt)
+        sp = site.get_solarposition(df.index)
+        df['SZA'], df['Azimuth'] = sp['zenith'], sp['azimuth']
+        df['GHI_cs'] = site.get_clearsky(df.index, model='ineichen')['ghi']
+        df['k_index'] = (df['GHI'] / (df['GHI_cs'] + 1e-6)).clip(0.0, 1.2)
+        df['hour'] = df.index.hour + df.index.minute / 60.0
+        df['sin_hour'], df['cos_hour'] = np.sin(2 * np.pi * df['hour'] / 24.0), np.cos(2 * np.pi * df['hour'] / 24.0)
+        return df
+
+    def _build_full_image_index(self):
+        cache_conf = {'root': self.image_root, 'tol': self.config['data'].get('image_tolerance_sec', 120), 'years': self.config['data'].get('years', 'all')}
+        h = hashlib.md5(json.dumps(cache_conf, sort_keys=True).encode()).hexdigest()[:8]
+        cache_path = os.path.join(self.image_root, f"_image_index_cache_{h}.pkl")
+        
+        if os.path.exists(cache_path) and not self.config['data'].get('rebuild_image_cache', False):
+            with open(cache_path, 'rb') as f: return pickle.load(f)
+
+        print("Building NREL image index (10-min cadence) target=_11.jpg...")
+        recs = []
+        cands = [os.path.join(r, n) for r, d, fs in os.walk(self.image_root) for n in fs if n.endswith('_11.jpg')]
+        for p in tqdm(cands, desc="Validating"):
+            try:
+                ts = datetime.strptime(os.path.basename(p)[:14], "%Y%m%d%H%M%S")
+                with Image.open(p) as img: img.verify()
+                recs.append({'timestamp': ts, 'filepath': p})
+            except: continue
+
+        idx_df = pd.DataFrame(recs).sort_values('timestamp').reset_index(drop=True)
+        with open(cache_path, 'wb') as f: pickle.dump(idx_df, f)
+        return idx_df
+
+    def _match_images(self):
+        img_idx = self._build_full_image_index()
+        w_df = pd.DataFrame({'timestamp': self.df.index}).sort_values('timestamp').reset_index(drop=True)
+        
+        matched = pd.merge_asof(w_df, img_idx, on='timestamp', direction='nearest', tolerance=pd.Timedelta(seconds=self.config['data'].get('image_tolerance_sec', 300))).dropna()
+        # Create a fast lookup dictionary from timestamp to filepath
+        img_dict = dict(zip(matched['timestamp'], matched['filepath']))
+        
+        df_set = set(self.df.index)
+        samples = []
+        
+        for dt, img_path in img_dict.items():
+            dt = dt.to_pydatetime()
+            if (dt - timedelta(seconds=self.sampling_rate * (self.sequence_length - 1))) not in df_set: continue
+            if not all((dt + timedelta(minutes=h)) in df_set for h in self.horizons): continue
+            
+            if self.use_aux:
+                next_dt = pd.Timestamp(dt + timedelta(seconds=self.sampling_rate))
+                if next_dt in img_dict:
+                    samples.append((img_path, img_dict[next_dt], dt))
+            else:
+                samples.append((img_path, None, dt))
+                
+        print(f"Final valid NREL samples: {len(samples)}")
+        return samples
+
+    def __len__(self): return len(self.samples)
+
+    def _process_image(self, path, size=(512, 512), mask_radius=250, is_target=False):
+        img = Image.open(path).convert('RGB').resize(size)
+        mask = Image.new('L', size, 0)
+        c = (size[0]//2, size[1]//2)
+        ImageDraw.Draw(mask).ellipse((c[0]-mask_radius, c[1]-mask_radius, c[0]+mask_radius, c[1]+mask_radius), fill=255)
+        img_np = np.array(img)
+        img_np[np.array(mask) == 0] = 0
+        img = Image.fromarray(img_np)
+        
+        if is_target:
+            img = img.resize((128, 128))
+            return transforms.Compose([transforms.ToTensor(), transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])])(img)
+        return self.transform(img) if self.transform else img
+
+    def __getitem__(self, idx):
+        # Retry logic for NREL
+        for att in range(5):
+            try:
+                img_p, next_p, dt = self.samples[(idx + att) % len(self.samples)]
+                image = self._process_image(img_p)
+                next_image = self._process_image(next_p, is_target=True) if self.use_aux else None
+                break
+            except: continue
+
+        seq_ts = [dt - timedelta(seconds=i*self.sampling_rate) for i in range(self.sequence_length)][::-1]
+        w_slice = self.df[self.feature_cols].reindex(seq_ts, method='nearest', tolerance=pd.Timedelta('10min')).ffill().bfill().fillna(0.0)
+        
+        w_vals = w_slice.values
+        if w_vals.dtype == 'object': w_vals = w_slice.apply(pd.to_numeric, errors='coerce').fillna(0.0).values
+        weather_seq = torch.tensor(w_vals, dtype=torch.float32)
+
+        t_vals, cs_vals = [], []
+        for h in self.horizons:
+            r = self.df.loc[dt + timedelta(minutes=h)]
+            t_vals.append(r['k_index'].iloc[0] if isinstance(r['k_index'], pd.Series) else r['k_index'])
+            cs_vals.append(r['GHI_cs'].iloc[0] if isinstance(r['GHI_cs'], pd.Series) else r['GHI_cs'])
+            
+        targets, ghi_cs = torch.tensor(t_vals, dtype=torch.float32), torch.tensor(cs_vals, dtype=torch.float32)
+
+        if self.use_aux: return image, weather_seq, targets, ghi_cs, next_image
+        return image, weather_seq, targets, ghi_cs
+
+def get_data_loaders(config):
+    transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])])
+    ds = SolarDataset(config, transform=transform)
+    
+    tr_y, v_y, t_y = config['training'].get('train_years'), config['training'].get('val_years'), config['training'].get('test_years')
+    
+    if tr_y and v_y and t_y:
+        tr_idx = [i for i, (_, _, dt) in enumerate(ds.samples) if dt.year in tr_y]
+        v_idx = [i for i, (_, _, dt) in enumerate(ds.samples) if dt.year in v_y]
+        t_idx = [i for i, (_, _, dt) in enumerate(ds.samples) if dt.year in t_y]
+    else:
+        tl = len(ds)
+        v_s, t_s = float(config['training'].get('val_split', 0.1)), float(config['training'].get('test_split', 0.1))
+        tr_l, v_l = int((1.0 - v_s - t_s) * tl), int(v_s * tl)
+        idx = list(range(tl))
+        tr_idx, v_idx, t_idx = idx[:tr_l], idx[tr_l:tr_l+v_l], idx[tr_l+v_l:]
+
+    bs, nw = config['data']['batch_size'], config['data']['num_workers']
+    return DataLoader(torch.utils.data.Subset(ds, tr_idx), batch_size=bs, shuffle=True, num_workers=nw), \
+           DataLoader(torch.utils.data.Subset(ds, v_idx), batch_size=bs, shuffle=False, num_workers=nw), \
+           DataLoader(torch.utils.data.Subset(ds, t_idx), batch_size=bs, shuffle=False, num_workers=nw)

@@ -1,0 +1,51 @@
+env: "server"
+device: null
+
+data:
+  local_root: "../mock_data_storage"
+  server_root: "/storage2/CV_Irradiance"
+  csv_path: "/storage2/CV_Irradiance/datasets/1_Folsom/csv_files/Folsom_irradiance_weather.csv"
+  image_root: "/storage2/CV_Irradiance/datasets/1_Folsom"
+  image_tolerance_sec: 120
+  dataset_type: "folsom"
+  years: [2014]
+  sampling_rate_sec: 60
+  sequence_length: 40
+  image_size: 512
+  batch_size: 8
+  num_workers: 8
+
+visual:
+  family: "spatial_mamba"
+  name: "spatial_mamba"
+  scale: "base"
+  pretrained: true
+  weight_path: "weights/spatial_mamba_base_1k.pth"
+  model_kwargs: {}
+
+model:
+  horizons: [10, 20, 30, 40, 50, 60]
+  temporal_channels: 7
+  temporal_embedding_dim: 128
+  target_channels: [64, 128, 256, 512]
+  fusion_mode: "ladder"
+  head_hidden_dim: 256
+  dropout: 0.3
+  use_aux_decoder: false
+
+training:
+  seed: 42
+  epochs: 50
+  learning_rate: 5.0e-5
+  min_learning_rate: 1.0e-6
+  backbone_lr_ratio: 0.1
+  weight_decay: 0.05
+  grad_clip: 5.0
+  gradient_accumulation_steps: 1
+  early_stop_patience: 12
+  huber_delta: 1.0
+  aux_weight: 0.2
+  use_amp: true
+  compile: false
+  val_split: 0.11
+  test_split: 0.33

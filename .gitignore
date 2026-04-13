@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Environments
+.env
+.env.*
+.venv/
+venv/
+env/
+.python-version
+
+# Notebook / IDE
+.ipynb_checkpoints/
+.idea/
+.vscode/
+
+# Project artifacts
+results/
+weights/
+data/
+logs/
+tmp/
+*.log
+*.tmp
+
+# OS
+.DS_Store
+Thumbs.db
+
