@@ -111,14 +111,69 @@ def default_batch_probe_max(config: Dict[str, Any]) -> int:
     return 32 if family != "timm" else 64
 
 
-def build_batch_size_candidates(config: Dict[str, Any], requested_batch_size: int) -> list[int]:
+def _next_power_of_two(value: int) -> int:
+    probe = 1
+    while probe < max(1, value):
+        probe *= 2
+    return probe
+
+
+def memory_aware_batch_probe_max(device: torch.device, config: Dict[str, Any]) -> int:
+    family = str(config["visual"].get("family", "timm")).lower()
+    scale = str(config["visual"].get("scale", config["visual"].get("name", "tiny"))).lower()
+    base_max = default_batch_probe_max(config)
+    if device.type != "cuda":
+        return base_max
+
+    try:
+        free_bytes, total_bytes = torch.cuda.mem_get_info(device)
+    except Exception:
+        return base_max
+
+    free_gib = free_bytes / float(1024**3)
+    image_size = int(config["data"].get("image_size", 224))
+
+    multiplier = 1
+    if free_gib >= 24:
+        multiplier = 4
+    elif free_gib >= 16:
+        multiplier = 2
+
+    if image_size >= 384:
+        multiplier = max(1, multiplier // 2)
+
+    if family == "timm":
+        absolute_cap = 256
+        if any(token in scale for token in ("base", "_b")):
+            absolute_cap = 128
+        if any(token in scale for token in ("large2", "large", "_l2", "_l")):
+            absolute_cap = 32
+    else:
+        absolute_cap = 128
+        if any(token in scale for token in ("base", "_b")):
+            absolute_cap = 64
+        if any(token in scale for token in ("large2", "large", "_l2", "_l")):
+            absolute_cap = 16
+
+    target = min(absolute_cap, max(base_max, _next_power_of_two(base_max * multiplier)))
+    print(
+        f"[autotune] free_memory_gib={free_gib:.2f} "
+        f"base_probe_max={base_max} adjusted_probe_max={target}"
+    )
+    return target
+
+
+def build_batch_size_candidates(config: Dict[str, Any], requested_batch_size: int, *, device: torch.device) -> list[int]:
     train_cfg = config["training"]
     explicit_candidates = train_cfg.get("batch_size_candidates")
     if explicit_candidates:
         candidates = [int(value) for value in explicit_candidates]
     else:
         min_candidate = max(1, int(train_cfg.get("batch_size_probe_min", 1)))
-        max_candidate = max(min_candidate, int(train_cfg.get("batch_size_probe_max", default_batch_probe_max(config))))
+        max_candidate = max(
+            min_candidate,
+            int(train_cfg.get("batch_size_probe_max", memory_aware_batch_probe_max(device, config))),
+        )
         candidates = []
         probe = 1
         while probe < max_candidate:
@@ -150,7 +205,7 @@ def autotune_batch_size(
     sequence_length = int(config["data"]["sequence_length"])
     temporal_channels = int(config["model"].get("temporal_channels", 7))
     delta = float(train_cfg.get("huber_delta", 1.0))
-    candidates = build_batch_size_candidates(config, requested_batch_size)
+    candidates = build_batch_size_candidates(config, requested_batch_size, device=device)
 
     best_batch_size = requested_batch_size
     best_samples_per_second = -1.0
