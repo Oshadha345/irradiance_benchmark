@@ -12,7 +12,7 @@ data:
   sampling_rate_sec: 60
   sequence_length: 40
   image_size: 512
-  batch_size: 32
+  batch_size: 16
   num_workers: 8
 
 visual:
@@ -48,4 +48,3 @@ training:
   compile: false
   val_split: 0.11
   test_split: 0.33
-

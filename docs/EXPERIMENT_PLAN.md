@@ -38,8 +38,8 @@ export NREL_ERF_IMAGE="/storage2/CV_Irradiance/datasets/4_NREL/2019_09_07/images
 
 ## Stage 0: Setup
 
-- [ ] `PYTHONNOUSERSITE=1 PYTHON_BIN="${PYTHON_BIN}" SKIP_PYTHON_DEPS=1 bash setup.sh`
-- [ ] `ls -lh weights`
+- [x] `PYTHONNOUSERSITE=1 PYTHON_BIN="${PYTHON_BIN}" SKIP_PYTHON_DEPS=1 bash setup.sh`
+- [x] `ls -lh weights`
 
 Notes:
 - Keep `PYTHONNOUSERSITE=1` enabled.

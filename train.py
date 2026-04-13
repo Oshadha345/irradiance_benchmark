@@ -74,15 +74,15 @@ def maybe_compile(model: nn.Module, enabled: bool) -> nn.Module:
     return model
 
 
-def get_batch_size(model_name: str) -> int:
+def get_max_batch_size(model_name: str) -> int:
     normalized = model_name.lower()
     if any(token in normalized for token in ("large2", "large", "_l2", "_l")):
-        return 8
+        return 4
     if any(token in normalized for token in ("base", "_b")):
         return 16
     if any(token in normalized for token in ("small", "_s")):
-        return 32
-    return 64
+        return 16
+    return 16
 
 
 def select_primary_horizon(targets: torch.Tensor) -> torch.Tensor:
@@ -97,7 +97,9 @@ def main() -> None:
     seed_everything(int(config["training"].get("seed", 42)))
 
     scale = str(config["visual"].get("scale", config["visual"].get("name", "tiny")))
-    effective_batch_size = get_batch_size(scale)
+    requested_batch_size = int(config["data"].get("batch_size", 16))
+    max_batch_size = get_max_batch_size(scale)
+    effective_batch_size = min(requested_batch_size, max_batch_size)
     config["data"]["batch_size"] = effective_batch_size
     config["model"]["horizons"] = [int(list(config["model"].get("horizons", [10]))[0])]
 
@@ -114,7 +116,10 @@ def main() -> None:
     with (run_dir / "config.yaml").open("w", encoding="utf-8") as handle:
         yaml.safe_dump(config, handle, sort_keys=False)
     print(f"[run_dir] {run_dir}")
-    print(f"[batch_size] using dynamic batch size {effective_batch_size}")
+    print(
+        f"[batch_size] using batch size {effective_batch_size} "
+        f"(requested={requested_batch_size}, max_for_scale={max_batch_size})"
+    )
 
     train_loader, val_loader, test_loader = get_data_loaders(config)
     model = build_model(config).to(device)
