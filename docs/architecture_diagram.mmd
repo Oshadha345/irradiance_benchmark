@@ -1,0 +1,112 @@
+flowchart LR
+  %% Codebase-faithful Mermaid architecture for the executed baseline.
+  %% Layout and color choices are adapted from figures/architecture_diagram.png.
+
+  classDef imageData fill:#A8CCF2,stroke:#1A1A1A,stroke-width:2px,color:#111111;
+  classDef visual fill:#1F3F7F,stroke:#111111,stroke-width:2px,color:#FFFFFF;
+  classDef projector fill:#D7E9FB,stroke:#1A1A1A,stroke-width:2px,color:#111111;
+  classDef gelu fill:#BFE3B7,stroke:#1A1A1A,stroke-width:2px,color:#111111;
+  classDef temporal fill:#61BFAF,stroke:#1A1A1A,stroke-width:2px,color:#FFFFFF;
+  classDef fusion fill:#E4AD21,stroke:#1A1A1A,stroke-width:2px,color:#111111;
+  classDef regression fill:#F18653,stroke:#1A1A1A,stroke-width:2px,color:#111111;
+  classDef regressionInner fill:#F6C197,stroke:#1A1A1A,stroke-width:2px,color:#111111;
+  classDef descriptorVisual fill:#1F3F7F,stroke:#111111,stroke-width:2px,color:#FFFFFF;
+  classDef descriptorTemporal fill:#61BFAF,stroke:#1A1A1A,stroke-width:2px,color:#111111;
+  classDef dataFeature fill:#BEBEBE,stroke:#1A1A1A,stroke-width:2px,color:#111111;
+  classDef note fill:#FFFFFF,stroke:#808080,stroke-width:2px,color:#111111;
+  classDef output fill:#F18653,stroke:#1A1A1A,stroke-width:2px,color:#111111;
+
+  SI["Sky Image<br/>(B, 3, 224, 224)"]:::imageData
+
+  subgraph VB["4-Stage Visual Backbone (Swappable Encoder Family)"]
+    direction TB
+
+    subgraph VSTAGES[" "]
+      direction LR
+      S1["Stage I"]:::visual
+      S2["Stage II"]:::visual
+      S3["Stage III"]:::visual
+      S4["Stage IV"]:::visual
+    end
+
+    subgraph PROJ["Shared Stage Projector"]
+      direction TB
+      P1["Stage I -> 1x1 Conv -> BatchNorm -> GELU -> AdaptiveAvgPool2d(1) -> 256-D"]:::projector
+      P2["Stage II -> 1x1 Conv -> BatchNorm -> GELU -> AdaptiveAvgPool2d(1) -> 256-D"]:::projector
+      P3["Stage III -> 1x1 Conv -> BatchNorm -> GELU -> AdaptiveAvgPool2d(1) -> 256-D"]:::projector
+      P4["Stage IV -> 1x1 Conv -> BatchNorm -> GELU -> AdaptiveAvgPool2d(1) -> 256-D"]:::projector
+    end
+  end
+
+  VD["Visual Descriptor<br/>(1024-D)"]:::descriptorVisual
+
+  WH["Weather History<br/>(B, 40, 7)"]:::note
+  WFEAT["k_index<br/>temperature<br/>pressure<br/>SZA<br/>Azimuth<br/>sin_hour<br/>cos_hour"]:::dataFeature
+  LSTM["1-Layer<br/>LSTM"]:::temporal
+  TD["Temporal Descriptor<br/>(128-D)"]:::descriptorTemporal
+
+  CF["Concat Fusion<br/>(1152-D)"]:::fusion
+
+  subgraph RH["Regression Head"]
+    direction TB
+    LN["LayerNorm"]:::regressionInner
+    L1["Linear(1152 -> 256)"]:::regressionInner
+    G1["GELU"]:::gelu
+    DO["Dropout(0.3)"]:::regressionInner
+    L2["Linear(256 -> 1)"]:::regressionInner
+  end
+
+  KF["10-min<br/>k-index Forecast"]:::output
+  GCS["Clear-sky GHI<br/>(GHI_cs from dataloader)"]:::dataFeature
+  MUL["x GHI_cs"]:::dataFeature
+  GHI["GHI-space Results"]:::output
+
+  SB["Swappable Backbones<br/><br/>ConvNeXt: Tiny, Small, Base, Large<br/>Swin: Tiny, Small, Base<br/>VMamba: Tiny, Small, Base<br/>Spatial-Mamba: Tiny, Small, Base<br/>MambaVision: Tiny, Tiny2, Small, Base, Large, Large2"]:::note
+  PM["Preset Metadata<br/><br/>VMamba tiny: depths [2,2,8,2]<br/>VMamba small/base: depths [2,2,15,2]<br/>Spatial-Mamba tiny: depths [2,4,8,4]<br/>Spatial-Mamba small/base: depths [2,4,21,5]<br/>MambaVision base dims: 80, 96, 128, 196"]:::note
+  PP["Postprocess / Evaluation<br/><br/>Denormalize k_index using train/val stats<br/>Persistence baseline from last weather k_index<br/>Metrics: RMSE, nRMSE, MAE, MBE, R2, FS<br/>Efficiency: Params, FLOPs, FPS<br/>ERF overlay from final visual stage"]:::note
+
+  SI --> S1
+  S1 --> S2
+  S2 --> S3
+  S3 --> S4
+
+  S1 --> P1
+  S2 --> P2
+  S3 --> P3
+  S4 --> P4
+
+  P1 --> VD
+  P2 --> VD
+  P3 --> VD
+  P4 --> VD
+
+  WFEAT --> WH
+  WH --> LSTM
+  LSTM --> TD
+
+  VD --> CF
+  TD --> CF
+
+  CF --> LN
+  LN --> L1
+  L1 --> G1
+  G1 --> DO
+  DO --> L2
+  L2 --> KF
+
+  KF --> MUL
+  GCS --> MUL
+  MUL --> GHI
+
+  SB -. "visual.family / visual.name / visual.scale / visual.weight_path" .-> VB
+  PM -. "family presets / pretrained weights" .-> VB
+  KF -. "evaluate / save test_metrics.json" .-> PP
+  WH -. "persistence baseline source" .-> PP
+  S4 -. "final-stage ERF hook" .-> PP
+
+  style VB fill:#EEF5FF,stroke:#111111,stroke-width:2px,stroke-dasharray: 8 6
+  style VSTAGES fill:transparent,stroke:transparent
+  style PROJ fill:#FFFFFF,stroke:#9A9A9A,stroke-width:2px
+  style RH fill:#F7B08C,stroke:#1A1A1A,stroke-width:2px
+
+  linkStyle default stroke:#111111,stroke-width:2px
