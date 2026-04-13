@@ -23,6 +23,10 @@ The current repository state implements a strict baseline:
   - `small -> 32`
   - `base -> 16`
   - `large / large2 -> 8`
+- Training commands do not need a batch-size flag.
+  `train.py` overrides the training dataloader batch size internally.
+- The `--batch-size` flag on `scripts/postprocess.py` is only for the efficiency/FPS benchmark.
+  Its default is `4`.
 - Evaluation is single-horizon only:
   - `RMSE`
   - `nRMSE`
@@ -125,8 +129,7 @@ RUN_DIR=$(ls -td results/folsom/convnext_tiny_tiny_folsom_convnext_tiny_baseline
 "${PYTHON_BIN}" scripts/postprocess.py \
   --config configs/folsom_convnext_tiny.yaml \
   --run-dir "${RUN_DIR}" \
-  --input-image "${FOLSOM_ERF_IMAGE}" \
-  --batch-size 4
+  --input-image "${FOLSOM_ERF_IMAGE}"
 ```
 
 `scripts/postprocess.py` runs:
