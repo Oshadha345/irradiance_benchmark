@@ -16,6 +16,46 @@ from tqdm import tqdm
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
+
+def _select_consecutive_year_block(available_years, window=3):
+    years = sorted(int(year) for year in available_years)
+    for start in range(len(years) - window + 1):
+        candidate = years[start : start + window]
+        if candidate == list(range(candidate[0], candidate[0] + window)):
+            return candidate
+    raise ValueError(f"Unable to find {window} consecutive benchmark years in {years}.")
+
+
+def _chronological_benchmark_split(samples, val_split):
+    # For fair Swin/ConvNeXt baselines, we truncate NREL to the earliest 3-year
+    # chronological window: first 2 years for train/validation, next year for test.
+    available_years = sorted({dt.year for _, _, dt in samples})
+    selected_years = _select_consecutive_year_block(available_years, window=3)
+    trainval_years = set(selected_years[:2])
+    test_year = selected_years[2]
+
+    trainval_idx = [i for i, (_, _, dt) in enumerate(samples) if dt.year in trainval_years]
+    test_idx = [i for i, (_, _, dt) in enumerate(samples) if dt.year == test_year]
+    if len(trainval_idx) < 2 or not test_idx:
+        raise RuntimeError("Chronological benchmark split produced an empty partition.")
+
+    val_len = max(1, int(len(trainval_idx) * val_split))
+    val_len = min(val_len, len(trainval_idx) - 1)
+    train_idx = trainval_idx[:-val_len]
+    val_idx = trainval_idx[-val_len:]
+    return train_idx, val_idx, test_idx, selected_years
+
+
+def _renormalize_on_trainval_years(dataset, trainval_years):
+    cols_to_norm = ['k_index', 'temperature', 'pressure', 'SZA', 'Azimuth']
+    restored = dataset.df[dataset.feature_cols].copy()
+    restored[cols_to_norm] = restored[cols_to_norm] * (dataset.std[cols_to_norm] + 1e-6) + dataset.mean[cols_to_norm]
+
+    stats_frame = restored[restored.index.year.isin(trainval_years)]
+    dataset.mean = stats_frame[dataset.feature_cols].mean()
+    dataset.std = stats_frame[dataset.feature_cols].std()
+    dataset.df[cols_to_norm] = (restored[cols_to_norm] - dataset.mean[cols_to_norm]) / (dataset.std[cols_to_norm] + 1e-6)
+
 class SolarDataset(Dataset):
     def __init__(self, config, transform=None):
         self.config = config
@@ -26,9 +66,11 @@ class SolarDataset(Dataset):
         self.csv_path = config['data'].get('csv_path')
         self.image_root = config['data'].get('image_root')
         self.use_aux = config['model'].get('use_aux_decoder', False)
+        self.use_benchmark_split = bool(config['data'].get('enforce_benchmark_split', True))
 
         self.df = self._load_all_data()
-        if config['data'].get('years'): self.df = self.df[self.df.index.year.isin(config['data']['years'])]
+        if config['data'].get('years') and not self.use_benchmark_split:
+            self.df = self.df[self.df.index.year.isin(config['data']['years'])]
 
         # NREL Coordinates
         self.lat, self.lon, self.alt = 39.742, -105.178, 1828.8 
@@ -62,12 +104,23 @@ class SolarDataset(Dataset):
         return df
 
     def _build_full_image_index(self):
-        cache_conf = {'root': self.image_root, 'tol': self.config['data'].get('image_tolerance_sec', 120), 'years': self.config['data'].get('years', 'all')}
+        year_scope = 'benchmark_all' if self.use_benchmark_split else self.config['data'].get('years', 'all')
+        cache_conf = {'root': self.image_root, 'tol': self.config['data'].get('image_tolerance_sec', 120), 'years': year_scope}
         h = hashlib.md5(json.dumps(cache_conf, sort_keys=True).encode()).hexdigest()[:8]
         cache_path = os.path.join(self.image_root, f"_image_index_cache_{h}.pkl")
         
         if os.path.exists(cache_path) and not self.config['data'].get('rebuild_image_cache', False):
             with open(cache_path, 'rb') as f: return pickle.load(f)
+        if not self.config['data'].get('rebuild_image_cache', False):
+            existing_caches = sorted(
+                path for path in os.listdir(self.image_root)
+                if path.startswith("_image_index_cache_") and path.endswith(".pkl")
+            )
+            if existing_caches:
+                fallback_cache = os.path.join(self.image_root, existing_caches[0])
+                print(f"Reusing existing NREL image index cache: {fallback_cache}")
+                with open(fallback_cache, 'rb') as f:
+                    return pickle.load(f)
 
         print("Building NREL image index (10-min cadence) target=_11.jpg...")
         recs = []
@@ -156,19 +209,13 @@ class SolarDataset(Dataset):
 def get_data_loaders(config):
     transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])])
     ds = SolarDataset(config, transform=transform)
-    
-    tr_y, v_y, t_y = config['training'].get('train_years'), config['training'].get('val_years'), config['training'].get('test_years')
-    
-    if tr_y and v_y and t_y:
-        tr_idx = [i for i, (_, _, dt) in enumerate(ds.samples) if dt.year in tr_y]
-        v_idx = [i for i, (_, _, dt) in enumerate(ds.samples) if dt.year in v_y]
-        t_idx = [i for i, (_, _, dt) in enumerate(ds.samples) if dt.year in t_y]
-    else:
-        tl = len(ds)
-        v_s, t_s = float(config['training'].get('val_split', 0.1)), float(config['training'].get('test_split', 0.1))
-        tr_l, v_l = int((1.0 - v_s - t_s) * tl), int(v_s * tl)
-        idx = list(range(tl))
-        tr_idx, v_idx, t_idx = idx[:tr_l], idx[tr_l:tr_l+v_l], idx[tr_l+v_l:]
+
+    tr_idx, v_idx, t_idx, selected_years = _chronological_benchmark_split(
+        ds.samples,
+        val_split=float(config['training'].get('val_split', 0.1)),
+    )
+    _renormalize_on_trainval_years(ds, trainval_years=set(selected_years[:2]))
+    print(f"[split][nrel] train/val years={selected_years[:2]} test year={selected_years[2]}")
 
     bs, nw = config['data']['batch_size'], config['data']['num_workers']
     return DataLoader(torch.utils.data.Subset(ds, tr_idx), batch_size=bs, shuffle=True, num_workers=nw), \

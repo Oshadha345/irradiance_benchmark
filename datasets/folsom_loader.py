@@ -13,6 +13,46 @@ from datetime import datetime, timedelta
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
+
+def _select_consecutive_year_block(available_years, window=3):
+    years = sorted(int(year) for year in available_years)
+    for start in range(len(years) - window + 1):
+        candidate = years[start : start + window]
+        if candidate == list(range(candidate[0], candidate[0] + window)):
+            return candidate
+    raise ValueError(f"Unable to find {window} consecutive benchmark years in {years}.")
+
+
+def _chronological_benchmark_split(samples, val_split):
+    # Fair Swin/ConvNeXt-style benchmarking keeps a fixed chronological boundary:
+    # earliest 2 years for train/validation, and the subsequent year held out for test.
+    available_years = sorted({dt.year for _, _, dt in samples})
+    selected_years = _select_consecutive_year_block(available_years, window=3)
+    trainval_years = set(selected_years[:2])
+    test_year = selected_years[2]
+
+    trainval_idx = [i for i, (_, _, dt) in enumerate(samples) if dt.year in trainval_years]
+    test_idx = [i for i, (_, _, dt) in enumerate(samples) if dt.year == test_year]
+    if len(trainval_idx) < 2 or not test_idx:
+        raise RuntimeError("Chronological benchmark split produced an empty partition.")
+
+    val_len = max(1, int(len(trainval_idx) * val_split))
+    val_len = min(val_len, len(trainval_idx) - 1)
+    train_idx = trainval_idx[:-val_len]
+    val_idx = trainval_idx[-val_len:]
+    return train_idx, val_idx, test_idx, selected_years
+
+
+def _renormalize_on_trainval_years(dataset, trainval_years):
+    cols_to_norm = ['k_index', 'temperature', 'pressure', 'SZA', 'Azimuth']
+    restored = dataset.df[dataset.feature_cols].copy()
+    restored[cols_to_norm] = restored[cols_to_norm] * (dataset.std[cols_to_norm] + 1e-6) + dataset.mean[cols_to_norm]
+
+    stats_frame = restored[restored.index.year.isin(trainval_years)]
+    dataset.mean = stats_frame[dataset.feature_cols].mean()
+    dataset.std = stats_frame[dataset.feature_cols].std()
+    dataset.df[cols_to_norm] = (restored[cols_to_norm] - dataset.mean[cols_to_norm]) / (dataset.std[cols_to_norm] + 1e-6)
+
 class SolarDataset(Dataset):
     def __init__(self, config, transform=None):
         self.config = config
@@ -25,9 +65,11 @@ class SolarDataset(Dataset):
         self.image_root = config['data'].get('image_root')
         self.image_tolerance = timedelta(seconds=config['data'].get('image_tolerance_sec', 120))
         self.use_aux = config['model'].get('use_aux_decoder', False)
+        self.use_benchmark_split = bool(config['data'].get('enforce_benchmark_split', True))
 
         self.df = self._load_all_data()
-        if config['data'].get('years'): self.df = self.df[self.df.index.year.isin(config['data']['years'])]
+        if config['data'].get('years') and not self.use_benchmark_split:
+            self.df = self.df[self.df.index.year.isin(config['data']['years'])]
 
         self.lat, self.lon, self.alt = 38.642, -121.148, 60.0 
         self.df = self._add_solar_physics(self.df, self.lat, self.lon, self.alt)
@@ -149,14 +191,17 @@ class SolarDataset(Dataset):
 def get_data_loaders(config):
     transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])])
     ds = SolarDataset(config, transform=transform)
-    tl = len(ds)
-    v_split, t_split = float(config['training'].get('val_split', 0.1)), float(config['training'].get('test_split', 0.1))
-    tr_len, v_len = int((1.0 - v_split - t_split) * tl), int(v_split * tl)
-    
-    idx = list(range(tl))
-    tr_ds = torch.utils.data.Subset(ds, idx[:tr_len])
-    v_ds = torch.utils.data.Subset(ds, idx[tr_len:tr_len+v_len])
-    t_ds = torch.utils.data.Subset(ds, idx[tr_len+v_len:])
-    
+
+    tr_idx, v_idx, t_idx, selected_years = _chronological_benchmark_split(
+        ds.samples,
+        val_split=float(config['training'].get('val_split', 0.1)),
+    )
+    _renormalize_on_trainval_years(ds, trainval_years=set(selected_years[:2]))
+    print(f"[split][folsom] train/val years={selected_years[:2]} test year={selected_years[2]}")
+
+    tr_ds = torch.utils.data.Subset(ds, tr_idx)
+    v_ds = torch.utils.data.Subset(ds, v_idx)
+    t_ds = torch.utils.data.Subset(ds, t_idx)
+
     bs, nw = config['data']['batch_size'], config['data']['num_workers']
     return DataLoader(tr_ds, batch_size=bs, shuffle=True, num_workers=nw), DataLoader(v_ds, batch_size=bs, shuffle=False, num_workers=nw), DataLoader(t_ds, batch_size=bs, shuffle=False, num_workers=nw)

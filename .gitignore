@@ -29,8 +29,9 @@ logs/
 tmp/
 *.log
 *.tmp
+build/
+models/backbones/spatial_mamba/kernels/**/build/
 
 # OS
 .DS_Store
 Thumbs.db
-

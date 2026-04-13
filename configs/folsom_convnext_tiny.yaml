@@ -12,7 +12,7 @@ data:
   sampling_rate_sec: 60
   sequence_length: 40
   image_size: 512
-  batch_size: 8
+  batch_size: 32
   num_workers: 8
 
 visual:

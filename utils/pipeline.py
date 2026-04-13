@@ -51,6 +51,12 @@ def denormalize_k_index(values: np.ndarray, k_mean: float, k_std: float) -> np.n
     return (values * k_std) + k_mean
 
 
+def select_primary_horizon(values: torch.Tensor | np.ndarray) -> torch.Tensor | np.ndarray:
+    if values.ndim == 1:
+        return values[..., None]
+    return values[:, :1]
+
+
 def run_inference(
     model: nn.Module,
     dataloader: torch.utils.data.DataLoader,
@@ -70,15 +76,16 @@ def run_inference(
         for batch in tqdm(dataloader, desc=desc, leave=False):
             batch = batch_to_device(batch, device)
             images, weather_seq, targets, ghi_cs = batch[:4]
+            targets = select_primary_horizon(targets)
+            ghi_cs = select_primary_horizon(ghi_cs)
             predictions, _ = model(images, weather_seq)
             if criterion is not None:
                 losses.append(float(criterion(predictions, targets).item()))
 
-            pred_np = predictions.detach().cpu().numpy()
-            target_np = targets.detach().cpu().numpy()
-            ghi_np = ghi_cs.detach().cpu().numpy()
+            pred_np = select_primary_horizon(predictions.detach().cpu().numpy())
+            target_np = select_primary_horizon(targets.detach().cpu().numpy())
+            ghi_np = select_primary_horizon(ghi_cs.detach().cpu().numpy())
             persistence_np = weather_seq[:, -1, 0].detach().cpu().numpy()[:, None]
-            persistence_np = np.repeat(persistence_np, target_np.shape[1], axis=1)
 
             pred_real = denormalize_k_index(pred_np, stats["k_mean"], stats["k_std"])
             target_real = denormalize_k_index(target_np, stats["k_mean"], stats["k_std"])
@@ -110,18 +117,19 @@ def build_metric_report(
     outputs: Dict[str, Any],
     horizons: list[int],
 ) -> Dict[str, Any]:
+    primary_horizon = [int(horizons[0])] if horizons else [10]
     return {
         "ghi": summarize_multi_horizon_metrics(
             predictions=outputs["pred_ghi"],
             targets=outputs["target_ghi"],
             baseline=outputs["baseline_ghi"],
-            horizons=horizons,
+            horizons=primary_horizon,
         ),
         "k_index": summarize_multi_horizon_metrics(
             predictions=outputs["pred_k"],
             targets=outputs["target_k"],
             baseline=outputs["baseline_k"],
-            horizons=horizons,
+            horizons=primary_horizon,
         ),
         "loss": outputs["loss"],
     }

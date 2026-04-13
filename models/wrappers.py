@@ -17,35 +17,79 @@ IMAGENET_STD = (0.229, 0.224, 0.225)
 
 def _resolve_module(root: nn.Module, dotted_name: str) -> nn.Module:
     module = root
-    for token in dotted_name.split("."):
-        module = getattr(module, token)
+    tokens = dotted_name.split(".")
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if hasattr(module, token):
+            module = getattr(module, token)
+            index += 1
+            continue
+        if index + 1 < len(tokens) and tokens[index + 1].isdigit():
+            flattened = f"{token}_{tokens[index + 1]}"
+            if hasattr(module, flattened):
+                module = getattr(module, flattened)
+                index += 2
+                continue
+        if token.isdigit():
+            module = module[int(token)]  # type: ignore[index]
+            index += 1
+            continue
+        raise AttributeError(f"Unable to resolve module path '{dotted_name}' from '{type(root).__name__}'.")
     return module
 
 
 class FeatureProjector(nn.Module):
-    def __init__(self, in_channels: Sequence[int], out_channels: Sequence[int]) -> None:
+    """Project a 4-stage pyramid into a single 1024-D visual descriptor."""
+
+    def __init__(self, in_channels: Sequence[int], output_dim: int = 1024) -> None:
         super().__init__()
-        if len(in_channels) != 4 or len(out_channels) != 4:
+        if len(in_channels) != 4:
             raise ValueError("Expected exactly four backbone stages.")
+        if output_dim % 4 != 0:
+            raise ValueError("output_dim must be divisible by four for stage-wise pooling.")
+
+        self.output_dim = int(output_dim)
+        self.stage_dim = self.output_dim // 4
         self.layers = nn.ModuleList(
             [
                 nn.Sequential(
-                    nn.Conv2d(in_ch, out_ch, kernel_size=1, bias=False),
-                    nn.BatchNorm2d(out_ch),
+                    nn.Conv2d(in_ch, self.stage_dim, kernel_size=1, bias=False),
+                    nn.BatchNorm2d(self.stage_dim),
                     nn.GELU(),
                 )
-                for in_ch, out_ch in zip(in_channels, out_channels)
+                for in_ch in in_channels
             ]
         )
+        self.pool = nn.AdaptiveAvgPool2d(1)
 
-    def forward(self, features: Sequence[torch.Tensor]) -> List[torch.Tensor]:
-        return [layer(feature) for layer, feature in zip(self.layers, features)]
+    @staticmethod
+    def _to_nchw(feature: torch.Tensor, expected_channels: int) -> torch.Tensor:
+        if feature.ndim != 4:
+            raise ValueError(f"Expected a 4D feature map, got shape {tuple(feature.shape)}")
+        if feature.shape[1] == expected_channels:
+            return feature
+        if feature.shape[-1] == expected_channels:
+            return feature.permute(0, 3, 1, 2).contiguous()
+        raise ValueError(
+            f"Unable to determine channel axis for feature map with shape {tuple(feature.shape)} "
+            f"and expected channel count {expected_channels}."
+        )
+
+    def forward(self, features: Sequence[torch.Tensor]) -> torch.Tensor:
+        pooled = []
+        for layer, feature in zip(self.layers, features):
+            conv = layer[0]
+            normalized = self._to_nchw(feature, expected_channels=conv.in_channels)
+            projected = layer(normalized)
+            pooled.append(self.pool(projected).flatten(1))
+        return torch.cat(pooled, dim=1)
 
 
 class BaseEncoderWrapper(nn.Module):
-    def __init__(self, target_channels: Sequence[int]) -> None:
+    def __init__(self, output_dim: int = 1024) -> None:
         super().__init__()
-        self.target_channels = list(target_channels)
+        self.output_dim = int(output_dim)
 
     @property
     def final_stage_module(self) -> nn.Module:
@@ -55,6 +99,11 @@ class BaseEncoderWrapper(nn.Module):
 class TimmEncoderWrapper(BaseEncoderWrapper):
     """Unified `timm` wrapper for Swin and ConvNeXt backbones."""
 
+    @staticmethod
+    def _needs_explicit_img_size(model_name: str) -> bool:
+        lowered = model_name.lower()
+        return lowered.startswith("swin")
+
     def __init__(
         self,
         model_name: str,
@@ -62,30 +111,36 @@ class TimmEncoderWrapper(BaseEncoderWrapper):
         pretrained: bool,
         weight_path: str | None,
         image_size: int,
-        target_channels: Sequence[int],
+        output_dim: int = 1024,
         out_indices: Sequence[int] = (0, 1, 2, 3),
         model_kwargs: Dict[str, Any] | None = None,
     ) -> None:
-        super().__init__(target_channels=target_channels)
+        super().__init__(output_dim=output_dim)
         model_kwargs = dict(model_kwargs or {})
         local_weight_path = Path(weight_path).expanduser() if weight_path else None
         use_remote_pretrained = pretrained and (local_weight_path is None or not local_weight_path.is_file())
+        create_kwargs = {
+            "pretrained": use_remote_pretrained,
+            "features_only": True,
+            "out_indices": tuple(out_indices),
+            **model_kwargs,
+        }
+        # Swin needs the training resolution baked into the patch embedding logic.
+        # ConvNeXt and similar CNN backbones do not accept this argument.
+        if self._needs_explicit_img_size(model_name):
+            create_kwargs["img_size"] = image_size
         self.backbone = timm.create_model(
             model_name,
-            pretrained=use_remote_pretrained,
-            features_only=True,
-            out_indices=tuple(out_indices),
-            img_size=image_size,
-            **model_kwargs,
+            **create_kwargs,
         )
         if local_weight_path is not None and local_weight_path.is_file():
             timm_load_checkpoint(self.backbone, str(local_weight_path), strict=False)
         self.feature_channels = list(self.backbone.feature_info.channels())
-        self.projector = FeatureProjector(self.feature_channels, self.target_channels)
+        self.projector = FeatureProjector(self.feature_channels, output_dim=self.output_dim)
         module_name = self.backbone.feature_info.module_name(out_indices[-1])
         self.backbone_final_stage = _resolve_module(self.backbone, module_name)
 
-    def forward(self, x: torch.Tensor) -> List[torch.Tensor]:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         features = self.backbone(x)
         return self.projector(features)
 
@@ -149,6 +204,14 @@ class MambaEncoderWrapper(BaseEncoderWrapper):
         "large": "mamba_vision_L",
         "large2": "mamba_vision_L2",
     }
+    MAMBAVISION_BASE_DIMS = {
+        "tiny": 80,
+        "tiny2": 80,
+        "small": 96,
+        "base": 128,
+        "large": 196,
+        "large2": 196,
+    }
 
     SPATIAL_PRESETS: Dict[str, Dict[str, Any]] = {
         "tiny": {"depths": [2, 4, 8, 4], "dims": 64, "d_state": 1, "dt_init": "random", "mlp_ratio": 4.0, "drop_path_rate": 0.2},
@@ -164,11 +227,11 @@ class MambaEncoderWrapper(BaseEncoderWrapper):
         pretrained: bool,
         weight_path: str | None,
         image_size: int,
-        target_channels: Sequence[int],
+        output_dim: int = 1024,
         model_kwargs: Dict[str, Any] | None = None,
         backbone_root: str | Path | None = None,
     ) -> None:
-        super().__init__(target_channels=target_channels)
+        super().__init__(output_dim=output_dim)
         self.family = family.lower()
         self.scale = scale.lower()
         self.image_size = image_size
@@ -178,7 +241,7 @@ class MambaEncoderWrapper(BaseEncoderWrapper):
         self._ensure_backbone_root_on_path()
         self.backbone = self._build_backbone(pretrained=pretrained)
         sample_channels = self._infer_stage_channels()
-        self.projector = FeatureProjector(sample_channels, self.target_channels)
+        self.projector = FeatureProjector(sample_channels, output_dim=self.output_dim)
 
     def _ensure_backbone_root_on_path(self) -> None:
         candidate_paths = [self.backbone_root.resolve()]
@@ -248,14 +311,16 @@ class MambaEncoderWrapper(BaseEncoderWrapper):
         return hook
 
     def _infer_stage_channels(self) -> List[int]:
-        with torch.no_grad():
-            was_training = self.backbone.training
-            self.backbone.eval()
-            sample = torch.zeros(1, 3, self.image_size, self.image_size)
-            features = self._forward_backbone(sample)
-            if was_training:
-                self.backbone.train()
-        return [int(feature.shape[1]) for feature in features]
+        if hasattr(self.backbone, "dims"):
+            dims = getattr(self.backbone, "dims")
+            if isinstance(dims, Iterable):
+                return [int(channel) for channel in list(dims)]
+
+        if self.family == "mambavision":
+            base_dim = int(self.MAMBAVISION_BASE_DIMS[self.scale])
+            return [int(base_dim * (2**idx)) for idx in range(4)]
+
+        raise RuntimeError(f"Unable to infer stage channels for backbone family '{self.family}'.")
 
     def _forward_backbone(self, x: torch.Tensor) -> List[torch.Tensor]:
         if self.family == "mambavision":
@@ -271,7 +336,7 @@ class MambaEncoderWrapper(BaseEncoderWrapper):
             raise RuntimeError(f"{self.family} backbone did not return a 4-stage pyramid.")
         return list(outputs)
 
-    def forward(self, x: torch.Tensor) -> List[torch.Tensor]:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         features = self._forward_backbone(x)
         return self.projector(features)
 
@@ -279,8 +344,8 @@ class MambaEncoderWrapper(BaseEncoderWrapper):
 def build_visual_encoder(config: Dict[str, Any]) -> BaseEncoderWrapper:
     visual_cfg = config["visual"]
     family = str(visual_cfg["family"]).lower()
-    target_channels = list(config["model"].get("target_channels", [64, 128, 256, 512]))
     image_size = int(config["data"].get("image_size", 512))
+    output_dim = int(config["model"].get("visual_feature_dim", 1024))
     model_kwargs = dict(visual_cfg.get("model_kwargs", {}))
 
     if family == "timm":
@@ -289,7 +354,7 @@ def build_visual_encoder(config: Dict[str, Any]) -> BaseEncoderWrapper:
             pretrained=bool(visual_cfg.get("pretrained", True)),
             weight_path=visual_cfg.get("weight_path"),
             image_size=image_size,
-            target_channels=target_channels,
+            output_dim=output_dim,
             model_kwargs=model_kwargs,
         )
 
@@ -300,7 +365,7 @@ def build_visual_encoder(config: Dict[str, Any]) -> BaseEncoderWrapper:
             pretrained=bool(visual_cfg.get("pretrained", True)),
             weight_path=visual_cfg.get("weight_path"),
             image_size=image_size,
-            target_channels=target_channels,
+            output_dim=output_dim,
             model_kwargs=model_kwargs,
         )
 

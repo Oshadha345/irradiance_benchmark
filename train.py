@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 import argparse
-import shutil
 import sys
 from pathlib import Path
 from typing import Any, Dict
 
 import torch
 import torch.nn as nn
-from torch.cuda.amp import GradScaler
+import yaml
 from tqdm import tqdm
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -17,13 +16,14 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from datasets import get_data_loaders
 from models import build_model
-from utils.pipeline import BoundaryLoss, build_metric_report, run_inference
+from utils.pipeline import build_metric_report, run_inference
 from utils.runtime import config_to_jsonable, create_run_dir, load_checkpoint, load_config, save_json, seed_everything
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train the irradiance benchmark model.")
     parser.add_argument("--config", type=str, required=True, help="Path to a YAML config.")
+    parser.add_argument("--comment", type=str, default=None, help="Optional tag appended to the run directory name.")
     parser.add_argument("--output-root", type=str, default=None, help="Optional override for the results root.")
     parser.add_argument("--resume", type=str, default=None, help="Optional checkpoint to resume from.")
     parser.add_argument("--device", type=str, default=None, help="Device override, e.g. cuda:0 or cpu.")
@@ -74,19 +74,47 @@ def maybe_compile(model: nn.Module, enabled: bool) -> nn.Module:
     return model
 
 
+def get_batch_size(model_name: str) -> int:
+    normalized = model_name.lower()
+    if any(token in normalized for token in ("large2", "large", "_l2", "_l")):
+        return 8
+    if any(token in normalized for token in ("base", "_b")):
+        return 16
+    if any(token in normalized for token in ("small", "_s")):
+        return 32
+    return 64
+
+
+def select_primary_horizon(targets: torch.Tensor) -> torch.Tensor:
+    if targets.ndim == 1:
+        return targets.unsqueeze(1)
+    return targets[:, :1]
+
+
 def main() -> None:
     args = parse_args()
     config = load_config(args.config)
     seed_everything(int(config["training"].get("seed", 42)))
+
+    scale = str(config["visual"].get("scale", config["visual"].get("name", "tiny")))
+    effective_batch_size = get_batch_size(scale)
+    config["data"]["batch_size"] = effective_batch_size
+    config["model"]["horizons"] = [int(list(config["model"].get("horizons", [10]))[0])]
 
     device_name = args.device or config.get("device") or ("cuda" if torch.cuda.is_available() else "cpu")
     device = torch.device(device_name)
     if device.type == "cuda":
         torch.backends.cudnn.benchmark = True
 
-    run_dir = create_run_dir(config, args.output_root)
-    save_json(config_to_jsonable(config), run_dir / "config.json")
-    shutil.copy2(args.config, run_dir / "config.yaml")
+    run_dir = create_run_dir(config, args.output_root, comment=args.comment)
+    jsonable_config = config_to_jsonable(config)
+    if args.comment:
+        jsonable_config["_run"] = {"comment": args.comment}
+    save_json(jsonable_config, run_dir / "config.json")
+    with (run_dir / "config.yaml").open("w", encoding="utf-8") as handle:
+        yaml.safe_dump(config, handle, sort_keys=False)
+    print(f"[run_dir] {run_dir}")
+    print(f"[batch_size] using dynamic batch size {effective_batch_size}")
 
     train_loader, val_loader, test_loader = get_data_loaders(config)
     model = build_model(config).to(device)
@@ -96,14 +124,12 @@ def main() -> None:
     optimizer = build_optimizer(model, config)
     scheduler = build_scheduler(optimizer, config)
     criterion = nn.HuberLoss(delta=float(config["training"].get("huber_delta", 1.0)))
-    aux_l1 = nn.L1Loss()
-    aux_boundary = BoundaryLoss().to(device)
-    aux_weight = float(config["training"].get("aux_weight", 0.2))
-    scaler = GradScaler(enabled=(device.type == "cuda" and bool(config["training"].get("use_amp", True))))
+    amp_enabled = device.type == "cuda" and bool(config["training"].get("use_amp", True))
+    scaler = torch.amp.GradScaler(device.type, enabled=amp_enabled)
     epochs = int(config["training"].get("epochs", 50))
     grad_accum_steps = int(config["training"].get("gradient_accumulation_steps", 1))
     patience = int(config["training"].get("early_stop_patience", 15))
-    use_aux_decoder = bool(config["model"].get("use_aux_decoder", False))
+    use_aux_decoder = False
     history = []
     best_rmse = float("inf")
     patience_counter = 0
@@ -135,15 +161,11 @@ def main() -> None:
         for step, batch in enumerate(progress, start=1):
             batch = tuple(item.to(device, non_blocking=True) if hasattr(item, "to") else item for item in batch)
             images, weather_seq, targets = batch[:3]
-            next_images = batch[4] if use_aux_decoder and len(batch) > 4 else None
+            targets = select_primary_horizon(targets)
 
-            with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=scaler.is_enabled()):
+            with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=amp_enabled):
                 predictions, aux_prediction = model(images, weather_seq)
                 loss = criterion(predictions, targets)
-                aux_value = torch.tensor(0.0, device=device)
-                if use_aux_decoder and aux_prediction is not None and next_images is not None:
-                    aux_value = aux_l1(aux_prediction, next_images) + 0.5 * aux_boundary(aux_prediction, next_images)
-                    loss = loss + (aux_weight * aux_value)
                 loss = loss / grad_accum_steps
 
             if not torch.isfinite(loss):
@@ -160,7 +182,7 @@ def main() -> None:
                 optimizer.zero_grad(set_to_none=True)
 
             epoch_loss += float(loss.item() * grad_accum_steps)
-            progress.set_postfix({"loss": f"{loss.item() * grad_accum_steps:.4f}", "aux": f"{aux_value.item():.4f}"})
+            progress.set_postfix({"loss": f"{loss.item() * grad_accum_steps:.4f}"})
 
         scheduler.step()
         train_loss = epoch_loss / max(len(train_loader), 1)
@@ -230,4 +252,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

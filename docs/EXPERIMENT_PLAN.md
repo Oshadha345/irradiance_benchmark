@@ -1,383 +1,299 @@
 # Experiment Plan
 
-Central execution log for the MERCon 2026 benchmark sweep. Work through this file from top to bottom and update the logger at the end after each finished run.
+Ordered execution sheet for the double-blind MERCon 2026 baseline benchmark.
 
-## Ground Rules
+## Benchmark Rules
 
-- Run everything from `/storage2/CV_Irradiance/Mercon_Mamba/irradiance_benchmark`.
-- Run each experiment block in the same shell so `RUN_DIR` stays defined.
-- `evaluate.py` writes `test_metrics.json` next to `best.ckpt`.
-- `evaluate_efficiency.py` is routed into the same run directory with `--output`.
-- `ConvNeXt` uses `timm` pretrained weights and does not require a mirrored file in `weights/`.
-- ERF needs one representative RGB sky image per dataset. It is only used for visualization, not training.
+- Architecture:
+  - visual encoder -> `1024`-D pooled descriptor
+  - temporal encoder -> `LSTM(40 x 7 -> 128)`
+  - fusion -> concatenation + 2-layer MLP
+  - target -> single `10`-minute clear-sky index
+- `train.py` enforces the baseline contract at runtime:
+  - `sequence_length = 40`
+  - `horizons = [10]`
+  - dynamic batch size by scale: `tiny=64`, `small=32`, `base=16`, `large/large2=8`
+- Chronological dataset splits:
+  - `Folsom`: `2014-2015` train/val, `2016` test
+  - `NREL`: `2018-2019` train/val, `2020` test
+- `scripts/postprocess.py` runs test evaluation, efficiency, and ERF generation in one command.
 
-## Stage 0: Environment Bring-Up
+## Once Per Shell
 
-- [x] `cd /storage2/CV_Irradiance/Mercon_Mamba/irradiance_benchmark`
-- [x] `bash setup.sh`
-- [x] `ls -lh weights`
-- [ ] `export FOLSOM_ERF_IMAGE="/storage2/CV_Irradiance/datasets/1_Folsom/2014/04/04/20140404_010659.jpg"`
-- [ ] `export NREL_ERF_IMAGE="/storage2/CV_Irradiance/datasets/4_NREL/2019_09_07/images/UTC-7_2019_09_07-09_50_22_530200.jpg"`
+```bash
+cd /storage2/CV_Irradiance/Mercon_Mamba/irradiance_benchmark
 
-If this machine is running a CUDA-mismatched environment such as `torch==2.5.1+cu121` with `/usr/bin/nvcc` from CUDA 11.5, use this instead so the setup does not modify the env and does not fail at Spatial-Mamba kernel compilation:
+export PYTHONNOUSERSITE=1
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export CUDA_VISIBLE_DEVICES=1
+export PYTHON_BIN=/userhomes/shehan15/miniconda3/envs/solarmamba_train_1/bin/python
 
-- [ ] `SKIP_PYTHON_DEPS=1 SKIP_SPATIAL_MAMBA_BUILD=1 bash setup.sh`
+export FOLSOM_ERF_IMAGE="/storage2/CV_Irradiance/datasets/1_Folsom/2014/04/04/20140404_010659.jpg"
+export NREL_ERF_IMAGE="/storage2/CV_Irradiance/datasets/4_NREL/2019_09_07/images/UTC-7_2019_09_07-09_50_22_530200.jpg"
+```
 
-Spatial-Mamba experiments should stay unchecked until a matching CUDA toolkit is available through `CUDA_HOME`.
+## Stage 0: Setup
+
+- [ ] `PYTHONNOUSERSITE=1 PYTHON_BIN="${PYTHON_BIN}" SKIP_PYTHON_DEPS=1 bash setup.sh`
+- [ ] `ls -lh weights`
+
+Notes:
+- Keep `PYTHONNOUSERSITE=1` enabled.
+- The first NREL access may build or reuse `_image_index_cache_*.pkl` under `open_solar/srrl_2017_to_2025/`.
 
 ## Stage 1: Folsom Baselines
 
 ### Folsom ConvNeXt-Tiny
 
-- [ ] `python train.py --config configs/folsom_convnext_tiny.yaml`
-- [ ] `RUN_DIR=$(ls -td results/folsom/convnext_tiny_tiny_* | head -1)`
-- [ ] `python evaluate.py --config configs/folsom_convnext_tiny.yaml --checkpoint "${RUN_DIR}/best.ckpt"`
-- [ ] `python evaluate_efficiency.py --config configs/folsom_convnext_tiny.yaml --checkpoint "${RUN_DIR}/best.ckpt" --batch-size 4 --output "${RUN_DIR}/efficiency_report.json"`
-- [ ] `python utils/visualize_erf.py --config configs/folsom_convnext_tiny.yaml --checkpoint "${RUN_DIR}/best.ckpt" --input-image "${FOLSOM_ERF_IMAGE}" --output "${RUN_DIR}/erf_overlay.png"`
+- [ ] `"${PYTHON_BIN}" scripts/train.py --config configs/folsom_convnext_tiny.yaml --comment "folsom_convnext_tiny_baseline"`
+- [ ] `RUN_DIR=$(ls -td results/folsom/convnext_tiny_tiny_folsom_convnext_tiny_baseline_* | head -1)`
+- [ ] `"${PYTHON_BIN}" scripts/postprocess.py --config configs/folsom_convnext_tiny.yaml --run-dir "${RUN_DIR}" --input-image "${FOLSOM_ERF_IMAGE}" --batch-size 4`
 
 ### Folsom ConvNeXt-Small
 
-- [ ] `python train.py --config configs/folsom_convnext_small.yaml`
-- [ ] `RUN_DIR=$(ls -td results/folsom/convnext_small_small_* | head -1)`
-- [ ] `python evaluate.py --config configs/folsom_convnext_small.yaml --checkpoint "${RUN_DIR}/best.ckpt"`
-- [ ] `python evaluate_efficiency.py --config configs/folsom_convnext_small.yaml --checkpoint "${RUN_DIR}/best.ckpt" --batch-size 4 --output "${RUN_DIR}/efficiency_report.json"`
-- [ ] `python utils/visualize_erf.py --config configs/folsom_convnext_small.yaml --checkpoint "${RUN_DIR}/best.ckpt" --input-image "${FOLSOM_ERF_IMAGE}" --output "${RUN_DIR}/erf_overlay.png"`
+- [ ] `"${PYTHON_BIN}" scripts/train.py --config configs/folsom_convnext_small.yaml --comment "folsom_convnext_small_baseline"`
+- [ ] `RUN_DIR=$(ls -td results/folsom/convnext_small_small_folsom_convnext_small_baseline_* | head -1)`
+- [ ] `"${PYTHON_BIN}" scripts/postprocess.py --config configs/folsom_convnext_small.yaml --run-dir "${RUN_DIR}" --input-image "${FOLSOM_ERF_IMAGE}" --batch-size 4`
 
 ### Folsom ConvNeXt-Base
 
-- [ ] `python train.py --config configs/folsom_convnext_base.yaml`
-- [ ] `RUN_DIR=$(ls -td results/folsom/convnext_base_base_* | head -1)`
-- [ ] `python evaluate.py --config configs/folsom_convnext_base.yaml --checkpoint "${RUN_DIR}/best.ckpt"`
-- [ ] `python evaluate_efficiency.py --config configs/folsom_convnext_base.yaml --checkpoint "${RUN_DIR}/best.ckpt" --batch-size 4 --output "${RUN_DIR}/efficiency_report.json"`
-- [ ] `python utils/visualize_erf.py --config configs/folsom_convnext_base.yaml --checkpoint "${RUN_DIR}/best.ckpt" --input-image "${FOLSOM_ERF_IMAGE}" --output "${RUN_DIR}/erf_overlay.png"`
+- [ ] `"${PYTHON_BIN}" scripts/train.py --config configs/folsom_convnext_base.yaml --comment "folsom_convnext_base_baseline"`
+- [ ] `RUN_DIR=$(ls -td results/folsom/convnext_base_base_folsom_convnext_base_baseline_* | head -1)`
+- [ ] `"${PYTHON_BIN}" scripts/postprocess.py --config configs/folsom_convnext_base.yaml --run-dir "${RUN_DIR}" --input-image "${FOLSOM_ERF_IMAGE}" --batch-size 4`
 
 ### Folsom ConvNeXt-Large
 
-- [ ] `python train.py --config configs/folsom_convnext_large.yaml`
-- [ ] `RUN_DIR=$(ls -td results/folsom/convnext_large_large_* | head -1)`
-- [ ] `python evaluate.py --config configs/folsom_convnext_large.yaml --checkpoint "${RUN_DIR}/best.ckpt"`
-- [ ] `python evaluate_efficiency.py --config configs/folsom_convnext_large.yaml --checkpoint "${RUN_DIR}/best.ckpt" --batch-size 4 --output "${RUN_DIR}/efficiency_report.json"`
-- [ ] `python utils/visualize_erf.py --config configs/folsom_convnext_large.yaml --checkpoint "${RUN_DIR}/best.ckpt" --input-image "${FOLSOM_ERF_IMAGE}" --output "${RUN_DIR}/erf_overlay.png"`
+- [ ] `"${PYTHON_BIN}" scripts/train.py --config configs/folsom_convnext_large.yaml --comment "folsom_convnext_large_baseline"`
+- [ ] `RUN_DIR=$(ls -td results/folsom/convnext_large_large_folsom_convnext_large_baseline_* | head -1)`
+- [ ] `"${PYTHON_BIN}" scripts/postprocess.py --config configs/folsom_convnext_large.yaml --run-dir "${RUN_DIR}" --input-image "${FOLSOM_ERF_IMAGE}" --batch-size 4`
 
-### Folsom Swin-T
+### Folsom Swin-Tiny
 
-- [ ] `python train.py --config configs/folsom_swin_tiny.yaml`
-- [ ] `RUN_DIR=$(ls -td results/folsom/swin_tiny_patch4_window7_224_tiny_* | head -1)`
-- [ ] `python evaluate.py --config configs/folsom_swin_tiny.yaml --checkpoint "${RUN_DIR}/best.ckpt"`
-- [ ] `python evaluate_efficiency.py --config configs/folsom_swin_tiny.yaml --checkpoint "${RUN_DIR}/best.ckpt" --batch-size 4 --output "${RUN_DIR}/efficiency_report.json"`
-- [ ] `python utils/visualize_erf.py --config configs/folsom_swin_tiny.yaml --checkpoint "${RUN_DIR}/best.ckpt" --input-image "${FOLSOM_ERF_IMAGE}" --output "${RUN_DIR}/erf_overlay.png"`
+- [ ] `"${PYTHON_BIN}" scripts/train.py --config configs/folsom_swin_tiny.yaml --comment "folsom_swin_tiny_baseline"`
+- [ ] `RUN_DIR=$(ls -td results/folsom/swin_tiny_patch4_window7_224_tiny_folsom_swin_tiny_baseline_* | head -1)`
+- [ ] `"${PYTHON_BIN}" scripts/postprocess.py --config configs/folsom_swin_tiny.yaml --run-dir "${RUN_DIR}" --input-image "${FOLSOM_ERF_IMAGE}" --batch-size 4`
 
-### Folsom Swin-S
+### Folsom Swin-Small
 
-- [ ] `python train.py --config configs/folsom_swin_small.yaml`
-- [ ] `RUN_DIR=$(ls -td results/folsom/swin_small_patch4_window7_224_small_* | head -1)`
-- [ ] `python evaluate.py --config configs/folsom_swin_small.yaml --checkpoint "${RUN_DIR}/best.ckpt"`
-- [ ] `python evaluate_efficiency.py --config configs/folsom_swin_small.yaml --checkpoint "${RUN_DIR}/best.ckpt" --batch-size 4 --output "${RUN_DIR}/efficiency_report.json"`
-- [ ] `python utils/visualize_erf.py --config configs/folsom_swin_small.yaml --checkpoint "${RUN_DIR}/best.ckpt" --input-image "${FOLSOM_ERF_IMAGE}" --output "${RUN_DIR}/erf_overlay.png"`
+- [ ] `"${PYTHON_BIN}" scripts/train.py --config configs/folsom_swin_small.yaml --comment "folsom_swin_small_baseline"`
+- [ ] `RUN_DIR=$(ls -td results/folsom/swin_small_patch4_window7_224_small_folsom_swin_small_baseline_* | head -1)`
+- [ ] `"${PYTHON_BIN}" scripts/postprocess.py --config configs/folsom_swin_small.yaml --run-dir "${RUN_DIR}" --input-image "${FOLSOM_ERF_IMAGE}" --batch-size 4`
 
-### Folsom Swin-B
+### Folsom Swin-Base
 
-- [ ] `python train.py --config configs/folsom_swin_base.yaml`
-- [ ] `RUN_DIR=$(ls -td results/folsom/swin_base_patch4_window7_224_base_* | head -1)`
-- [ ] `python evaluate.py --config configs/folsom_swin_base.yaml --checkpoint "${RUN_DIR}/best.ckpt"`
-- [ ] `python evaluate_efficiency.py --config configs/folsom_swin_base.yaml --checkpoint "${RUN_DIR}/best.ckpt" --batch-size 4 --output "${RUN_DIR}/efficiency_report.json"`
-- [ ] `python utils/visualize_erf.py --config configs/folsom_swin_base.yaml --checkpoint "${RUN_DIR}/best.ckpt" --input-image "${FOLSOM_ERF_IMAGE}" --output "${RUN_DIR}/erf_overlay.png"`
+- [ ] `"${PYTHON_BIN}" scripts/train.py --config configs/folsom_swin_base.yaml --comment "folsom_swin_base_baseline"`
+- [ ] `RUN_DIR=$(ls -td results/folsom/swin_base_patch4_window7_224_base_folsom_swin_base_baseline_* | head -1)`
+- [ ] `"${PYTHON_BIN}" scripts/postprocess.py --config configs/folsom_swin_base.yaml --run-dir "${RUN_DIR}" --input-image "${FOLSOM_ERF_IMAGE}" --batch-size 4`
 
 ## Stage 2: Folsom Mamba Sweep
 
-### Folsom VMamba-T
+### Folsom VMamba-Tiny
 
-- [ ] `python train.py --config configs/folsom_vmamba_tiny.yaml`
-- [ ] `RUN_DIR=$(ls -td results/folsom/vmamba_tiny_* | head -1)`
-- [ ] `python evaluate.py --config configs/folsom_vmamba_tiny.yaml --checkpoint "${RUN_DIR}/best.ckpt"`
-- [ ] `python evaluate_efficiency.py --config configs/folsom_vmamba_tiny.yaml --checkpoint "${RUN_DIR}/best.ckpt" --batch-size 4 --output "${RUN_DIR}/efficiency_report.json"`
-- [ ] `python utils/visualize_erf.py --config configs/folsom_vmamba_tiny.yaml --checkpoint "${RUN_DIR}/best.ckpt" --input-image "${FOLSOM_ERF_IMAGE}" --output "${RUN_DIR}/erf_overlay.png"`
+- [ ] `"${PYTHON_BIN}" scripts/train.py --config configs/folsom_vmamba_tiny.yaml --comment "folsom_vmamba_tiny_baseline"`
+- [ ] `RUN_DIR=$(ls -td results/folsom/vmamba_tiny_folsom_vmamba_tiny_baseline_* | head -1)`
+- [ ] `"${PYTHON_BIN}" scripts/postprocess.py --config configs/folsom_vmamba_tiny.yaml --run-dir "${RUN_DIR}" --input-image "${FOLSOM_ERF_IMAGE}" --batch-size 4`
 
-### Folsom VMamba-S
+### Folsom VMamba-Small
 
-- [ ] `python train.py --config configs/folsom_vmamba_small.yaml`
-- [ ] `RUN_DIR=$(ls -td results/folsom/vmamba_small_* | head -1)`
-- [ ] `python evaluate.py --config configs/folsom_vmamba_small.yaml --checkpoint "${RUN_DIR}/best.ckpt"`
-- [ ] `python evaluate_efficiency.py --config configs/folsom_vmamba_small.yaml --checkpoint "${RUN_DIR}/best.ckpt" --batch-size 4 --output "${RUN_DIR}/efficiency_report.json"`
-- [ ] `python utils/visualize_erf.py --config configs/folsom_vmamba_small.yaml --checkpoint "${RUN_DIR}/best.ckpt" --input-image "${FOLSOM_ERF_IMAGE}" --output "${RUN_DIR}/erf_overlay.png"`
+- [ ] `"${PYTHON_BIN}" scripts/train.py --config configs/folsom_vmamba_small.yaml --comment "folsom_vmamba_small_baseline"`
+- [ ] `RUN_DIR=$(ls -td results/folsom/vmamba_small_folsom_vmamba_small_baseline_* | head -1)`
+- [ ] `"${PYTHON_BIN}" scripts/postprocess.py --config configs/folsom_vmamba_small.yaml --run-dir "${RUN_DIR}" --input-image "${FOLSOM_ERF_IMAGE}" --batch-size 4`
 
-### Folsom VMamba-B
+### Folsom VMamba-Base
 
-- [ ] `python train.py --config configs/folsom_vmamba_base.yaml`
-- [ ] `RUN_DIR=$(ls -td results/folsom/vmamba_base_* | head -1)`
-- [ ] `python evaluate.py --config configs/folsom_vmamba_base.yaml --checkpoint "${RUN_DIR}/best.ckpt"`
-- [ ] `python evaluate_efficiency.py --config configs/folsom_vmamba_base.yaml --checkpoint "${RUN_DIR}/best.ckpt" --batch-size 4 --output "${RUN_DIR}/efficiency_report.json"`
-- [ ] `python utils/visualize_erf.py --config configs/folsom_vmamba_base.yaml --checkpoint "${RUN_DIR}/best.ckpt" --input-image "${FOLSOM_ERF_IMAGE}" --output "${RUN_DIR}/erf_overlay.png"`
+- [ ] `"${PYTHON_BIN}" scripts/train.py --config configs/folsom_vmamba_base.yaml --comment "folsom_vmamba_base_baseline"`
+- [ ] `RUN_DIR=$(ls -td results/folsom/vmamba_base_folsom_vmamba_base_baseline_* | head -1)`
+- [ ] `"${PYTHON_BIN}" scripts/postprocess.py --config configs/folsom_vmamba_base.yaml --run-dir "${RUN_DIR}" --input-image "${FOLSOM_ERF_IMAGE}" --batch-size 4`
 
-### Folsom Spatial-Mamba-T
+### Folsom Spatial-Mamba-Tiny
 
-- [ ] `python train.py --config configs/folsom_spatial_mamba_tiny.yaml`
-- [ ] `RUN_DIR=$(ls -td results/folsom/spatial_mamba_tiny_* | head -1)`
-- [ ] `python evaluate.py --config configs/folsom_spatial_mamba_tiny.yaml --checkpoint "${RUN_DIR}/best.ckpt"`
-- [ ] `python evaluate_efficiency.py --config configs/folsom_spatial_mamba_tiny.yaml --checkpoint "${RUN_DIR}/best.ckpt" --batch-size 4 --output "${RUN_DIR}/efficiency_report.json"`
-- [ ] `python utils/visualize_erf.py --config configs/folsom_spatial_mamba_tiny.yaml --checkpoint "${RUN_DIR}/best.ckpt" --input-image "${FOLSOM_ERF_IMAGE}" --output "${RUN_DIR}/erf_overlay.png"`
+- [ ] `"${PYTHON_BIN}" scripts/train.py --config configs/folsom_spatial_mamba_tiny.yaml --comment "folsom_spatial_mamba_tiny_baseline"`
+- [ ] `RUN_DIR=$(ls -td results/folsom/spatial_mamba_tiny_folsom_spatial_mamba_tiny_baseline_* | head -1)`
+- [ ] `"${PYTHON_BIN}" scripts/postprocess.py --config configs/folsom_spatial_mamba_tiny.yaml --run-dir "${RUN_DIR}" --input-image "${FOLSOM_ERF_IMAGE}" --batch-size 4`
 
-### Folsom Spatial-Mamba-S
+### Folsom Spatial-Mamba-Small
 
-- [ ] `python train.py --config configs/folsom_spatial_mamba_small.yaml`
-- [ ] `RUN_DIR=$(ls -td results/folsom/spatial_mamba_small_* | head -1)`
-- [ ] `python evaluate.py --config configs/folsom_spatial_mamba_small.yaml --checkpoint "${RUN_DIR}/best.ckpt"`
-- [ ] `python evaluate_efficiency.py --config configs/folsom_spatial_mamba_small.yaml --checkpoint "${RUN_DIR}/best.ckpt" --batch-size 4 --output "${RUN_DIR}/efficiency_report.json"`
-- [ ] `python utils/visualize_erf.py --config configs/folsom_spatial_mamba_small.yaml --checkpoint "${RUN_DIR}/best.ckpt" --input-image "${FOLSOM_ERF_IMAGE}" --output "${RUN_DIR}/erf_overlay.png"`
+- [ ] `"${PYTHON_BIN}" scripts/train.py --config configs/folsom_spatial_mamba_small.yaml --comment "folsom_spatial_mamba_small_baseline"`
+- [ ] `RUN_DIR=$(ls -td results/folsom/spatial_mamba_small_folsom_spatial_mamba_small_baseline_* | head -1)`
+- [ ] `"${PYTHON_BIN}" scripts/postprocess.py --config configs/folsom_spatial_mamba_small.yaml --run-dir "${RUN_DIR}" --input-image "${FOLSOM_ERF_IMAGE}" --batch-size 4`
 
-### Folsom Spatial-Mamba-B
+### Folsom Spatial-Mamba-Base
 
-- [ ] `python train.py --config configs/folsom_spatial_mamba_base.yaml`
-- [ ] `RUN_DIR=$(ls -td results/folsom/spatial_mamba_base_* | head -1)`
-- [ ] `python evaluate.py --config configs/folsom_spatial_mamba_base.yaml --checkpoint "${RUN_DIR}/best.ckpt"`
-- [ ] `python evaluate_efficiency.py --config configs/folsom_spatial_mamba_base.yaml --checkpoint "${RUN_DIR}/best.ckpt" --batch-size 4 --output "${RUN_DIR}/efficiency_report.json"`
-- [ ] `python utils/visualize_erf.py --config configs/folsom_spatial_mamba_base.yaml --checkpoint "${RUN_DIR}/best.ckpt" --input-image "${FOLSOM_ERF_IMAGE}" --output "${RUN_DIR}/erf_overlay.png"`
+- [ ] `"${PYTHON_BIN}" scripts/train.py --config configs/folsom_spatial_mamba_base.yaml --comment "folsom_spatial_mamba_base_baseline"`
+- [ ] `RUN_DIR=$(ls -td results/folsom/spatial_mamba_base_folsom_spatial_mamba_base_baseline_* | head -1)`
+- [ ] `"${PYTHON_BIN}" scripts/postprocess.py --config configs/folsom_spatial_mamba_base.yaml --run-dir "${RUN_DIR}" --input-image "${FOLSOM_ERF_IMAGE}" --batch-size 4`
 
-### Folsom MambaVision-T
+### Folsom MambaVision-Tiny
 
-- [ ] `python train.py --config configs/folsom_mambavision_tiny.yaml`
-- [ ] `RUN_DIR=$(ls -td results/folsom/mambavision_tiny_* | head -1)`
-- [ ] `python evaluate.py --config configs/folsom_mambavision_tiny.yaml --checkpoint "${RUN_DIR}/best.ckpt"`
-- [ ] `python evaluate_efficiency.py --config configs/folsom_mambavision_tiny.yaml --checkpoint "${RUN_DIR}/best.ckpt" --batch-size 4 --output "${RUN_DIR}/efficiency_report.json"`
-- [ ] `python utils/visualize_erf.py --config configs/folsom_mambavision_tiny.yaml --checkpoint "${RUN_DIR}/best.ckpt" --input-image "${FOLSOM_ERF_IMAGE}" --output "${RUN_DIR}/erf_overlay.png"`
+- [ ] `"${PYTHON_BIN}" scripts/train.py --config configs/folsom_mambavision_tiny.yaml --comment "folsom_mambavision_tiny_baseline"`
+- [ ] `RUN_DIR=$(ls -td results/folsom/mambavision_tiny_folsom_mambavision_tiny_baseline_* | head -1)`
+- [ ] `"${PYTHON_BIN}" scripts/postprocess.py --config configs/folsom_mambavision_tiny.yaml --run-dir "${RUN_DIR}" --input-image "${FOLSOM_ERF_IMAGE}" --batch-size 4`
 
-### Folsom MambaVision-T2
+### Folsom MambaVision-Tiny2
 
-- [ ] `python train.py --config configs/folsom_mambavision_tiny2.yaml`
-- [ ] `RUN_DIR=$(ls -td results/folsom/mambavision_tiny2_* | head -1)`
-- [ ] `python evaluate.py --config configs/folsom_mambavision_tiny2.yaml --checkpoint "${RUN_DIR}/best.ckpt"`
-- [ ] `python evaluate_efficiency.py --config configs/folsom_mambavision_tiny2.yaml --checkpoint "${RUN_DIR}/best.ckpt" --batch-size 4 --output "${RUN_DIR}/efficiency_report.json"`
-- [ ] `python utils/visualize_erf.py --config configs/folsom_mambavision_tiny2.yaml --checkpoint "${RUN_DIR}/best.ckpt" --input-image "${FOLSOM_ERF_IMAGE}" --output "${RUN_DIR}/erf_overlay.png"`
+- [ ] `"${PYTHON_BIN}" scripts/train.py --config configs/folsom_mambavision_tiny2.yaml --comment "folsom_mambavision_tiny2_baseline"`
+- [ ] `RUN_DIR=$(ls -td results/folsom/mambavision_tiny2_folsom_mambavision_tiny2_baseline_* | head -1)`
+- [ ] `"${PYTHON_BIN}" scripts/postprocess.py --config configs/folsom_mambavision_tiny2.yaml --run-dir "${RUN_DIR}" --input-image "${FOLSOM_ERF_IMAGE}" --batch-size 4`
 
-### Folsom MambaVision-S
+### Folsom MambaVision-Small
 
-- [ ] `python train.py --config configs/folsom_mambavision_small.yaml`
-- [ ] `RUN_DIR=$(ls -td results/folsom/mambavision_small_* | head -1)`
-- [ ] `python evaluate.py --config configs/folsom_mambavision_small.yaml --checkpoint "${RUN_DIR}/best.ckpt"`
-- [ ] `python evaluate_efficiency.py --config configs/folsom_mambavision_small.yaml --checkpoint "${RUN_DIR}/best.ckpt" --batch-size 4 --output "${RUN_DIR}/efficiency_report.json"`
-- [ ] `python utils/visualize_erf.py --config configs/folsom_mambavision_small.yaml --checkpoint "${RUN_DIR}/best.ckpt" --input-image "${FOLSOM_ERF_IMAGE}" --output "${RUN_DIR}/erf_overlay.png"`
+- [ ] `"${PYTHON_BIN}" scripts/train.py --config configs/folsom_mambavision_small.yaml --comment "folsom_mambavision_small_baseline"`
+- [ ] `RUN_DIR=$(ls -td results/folsom/mambavision_small_folsom_mambavision_small_baseline_* | head -1)`
+- [ ] `"${PYTHON_BIN}" scripts/postprocess.py --config configs/folsom_mambavision_small.yaml --run-dir "${RUN_DIR}" --input-image "${FOLSOM_ERF_IMAGE}" --batch-size 4`
 
-### Folsom MambaVision-B
+### Folsom MambaVision-Base
 
-- [ ] `python train.py --config configs/folsom_mambavision_base.yaml`
-- [ ] `RUN_DIR=$(ls -td results/folsom/mambavision_base_* | head -1)`
-- [ ] `python evaluate.py --config configs/folsom_mambavision_base.yaml --checkpoint "${RUN_DIR}/best.ckpt"`
-- [ ] `python evaluate_efficiency.py --config configs/folsom_mambavision_base.yaml --checkpoint "${RUN_DIR}/best.ckpt" --batch-size 4 --output "${RUN_DIR}/efficiency_report.json"`
-- [ ] `python utils/visualize_erf.py --config configs/folsom_mambavision_base.yaml --checkpoint "${RUN_DIR}/best.ckpt" --input-image "${FOLSOM_ERF_IMAGE}" --output "${RUN_DIR}/erf_overlay.png"`
+- [ ] `"${PYTHON_BIN}" scripts/train.py --config configs/folsom_mambavision_base.yaml --comment "folsom_mambavision_base_baseline"`
+- [ ] `RUN_DIR=$(ls -td results/folsom/mambavision_base_folsom_mambavision_base_baseline_* | head -1)`
+- [ ] `"${PYTHON_BIN}" scripts/postprocess.py --config configs/folsom_mambavision_base.yaml --run-dir "${RUN_DIR}" --input-image "${FOLSOM_ERF_IMAGE}" --batch-size 4`
 
-### Folsom MambaVision-L
+### Folsom MambaVision-Large
 
-- [ ] `python train.py --config configs/folsom_mambavision_large.yaml`
-- [ ] `RUN_DIR=$(ls -td results/folsom/mambavision_large_* | head -1)`
-- [ ] `python evaluate.py --config configs/folsom_mambavision_large.yaml --checkpoint "${RUN_DIR}/best.ckpt"`
-- [ ] `python evaluate_efficiency.py --config configs/folsom_mambavision_large.yaml --checkpoint "${RUN_DIR}/best.ckpt" --batch-size 4 --output "${RUN_DIR}/efficiency_report.json"`
-- [ ] `python utils/visualize_erf.py --config configs/folsom_mambavision_large.yaml --checkpoint "${RUN_DIR}/best.ckpt" --input-image "${FOLSOM_ERF_IMAGE}" --output "${RUN_DIR}/erf_overlay.png"`
+- [ ] `"${PYTHON_BIN}" scripts/train.py --config configs/folsom_mambavision_large.yaml --comment "folsom_mambavision_large_baseline"`
+- [ ] `RUN_DIR=$(ls -td results/folsom/mambavision_large_folsom_mambavision_large_baseline_* | head -1)`
+- [ ] `"${PYTHON_BIN}" scripts/postprocess.py --config configs/folsom_mambavision_large.yaml --run-dir "${RUN_DIR}" --input-image "${FOLSOM_ERF_IMAGE}" --batch-size 4`
 
-### Folsom MambaVision-L2
+### Folsom MambaVision-Large2
 
-- [ ] `python train.py --config configs/folsom_mambavision_large2.yaml`
-- [ ] `RUN_DIR=$(ls -td results/folsom/mambavision_large2_* | head -1)`
-- [ ] `python evaluate.py --config configs/folsom_mambavision_large2.yaml --checkpoint "${RUN_DIR}/best.ckpt"`
-- [ ] `python evaluate_efficiency.py --config configs/folsom_mambavision_large2.yaml --checkpoint "${RUN_DIR}/best.ckpt" --batch-size 4 --output "${RUN_DIR}/efficiency_report.json"`
-- [ ] `python utils/visualize_erf.py --config configs/folsom_mambavision_large2.yaml --checkpoint "${RUN_DIR}/best.ckpt" --input-image "${FOLSOM_ERF_IMAGE}" --output "${RUN_DIR}/erf_overlay.png"`
+- [ ] `"${PYTHON_BIN}" scripts/train.py --config configs/folsom_mambavision_large2.yaml --comment "folsom_mambavision_large2_baseline"`
+- [ ] `RUN_DIR=$(ls -td results/folsom/mambavision_large2_folsom_mambavision_large2_baseline_* | head -1)`
+- [ ] `"${PYTHON_BIN}" scripts/postprocess.py --config configs/folsom_mambavision_large2.yaml --run-dir "${RUN_DIR}" --input-image "${FOLSOM_ERF_IMAGE}" --batch-size 4`
 
 ## Stage 3: NREL Baselines
 
 ### NREL ConvNeXt-Tiny
 
-- [ ] `python train.py --config configs/nrel_convnext_tiny.yaml`
-- [ ] `RUN_DIR=$(ls -td results/nrel/convnext_tiny_tiny_* | head -1)`
-- [ ] `python evaluate.py --config configs/nrel_convnext_tiny.yaml --checkpoint "${RUN_DIR}/best.ckpt"`
-- [ ] `python evaluate_efficiency.py --config configs/nrel_convnext_tiny.yaml --checkpoint "${RUN_DIR}/best.ckpt" --batch-size 4 --output "${RUN_DIR}/efficiency_report.json"`
-- [ ] `python utils/visualize_erf.py --config configs/nrel_convnext_tiny.yaml --checkpoint "${RUN_DIR}/best.ckpt" --input-image "${NREL_ERF_IMAGE}" --output "${RUN_DIR}/erf_overlay.png"`
+- [ ] `"${PYTHON_BIN}" scripts/train.py --config configs/nrel_convnext_tiny.yaml --comment "nrel_convnext_tiny_baseline"`
+- [ ] `RUN_DIR=$(ls -td results/nrel/convnext_tiny_tiny_nrel_convnext_tiny_baseline_* | head -1)`
+- [ ] `"${PYTHON_BIN}" scripts/postprocess.py --config configs/nrel_convnext_tiny.yaml --run-dir "${RUN_DIR}" --input-image "${NREL_ERF_IMAGE}" --batch-size 4`
 
 ### NREL ConvNeXt-Small
 
-- [ ] `python train.py --config configs/nrel_convnext_small.yaml`
-- [ ] `RUN_DIR=$(ls -td results/nrel/convnext_small_small_* | head -1)`
-- [ ] `python evaluate.py --config configs/nrel_convnext_small.yaml --checkpoint "${RUN_DIR}/best.ckpt"`
-- [ ] `python evaluate_efficiency.py --config configs/nrel_convnext_small.yaml --checkpoint "${RUN_DIR}/best.ckpt" --batch-size 4 --output "${RUN_DIR}/efficiency_report.json"`
-- [ ] `python utils/visualize_erf.py --config configs/nrel_convnext_small.yaml --checkpoint "${RUN_DIR}/best.ckpt" --input-image "${NREL_ERF_IMAGE}" --output "${RUN_DIR}/erf_overlay.png"`
+- [ ] `"${PYTHON_BIN}" scripts/train.py --config configs/nrel_convnext_small.yaml --comment "nrel_convnext_small_baseline"`
+- [ ] `RUN_DIR=$(ls -td results/nrel/convnext_small_small_nrel_convnext_small_baseline_* | head -1)`
+- [ ] `"${PYTHON_BIN}" scripts/postprocess.py --config configs/nrel_convnext_small.yaml --run-dir "${RUN_DIR}" --input-image "${NREL_ERF_IMAGE}" --batch-size 4`
 
 ### NREL ConvNeXt-Base
 
-- [ ] `python train.py --config configs/nrel_convnext_base.yaml`
-- [ ] `RUN_DIR=$(ls -td results/nrel/convnext_base_base_* | head -1)`
-- [ ] `python evaluate.py --config configs/nrel_convnext_base.yaml --checkpoint "${RUN_DIR}/best.ckpt"`
-- [ ] `python evaluate_efficiency.py --config configs/nrel_convnext_base.yaml --checkpoint "${RUN_DIR}/best.ckpt" --batch-size 4 --output "${RUN_DIR}/efficiency_report.json"`
-- [ ] `python utils/visualize_erf.py --config configs/nrel_convnext_base.yaml --checkpoint "${RUN_DIR}/best.ckpt" --input-image "${NREL_ERF_IMAGE}" --output "${RUN_DIR}/erf_overlay.png"`
+- [ ] `"${PYTHON_BIN}" scripts/train.py --config configs/nrel_convnext_base.yaml --comment "nrel_convnext_base_baseline"`
+- [ ] `RUN_DIR=$(ls -td results/nrel/convnext_base_base_nrel_convnext_base_baseline_* | head -1)`
+- [ ] `"${PYTHON_BIN}" scripts/postprocess.py --config configs/nrel_convnext_base.yaml --run-dir "${RUN_DIR}" --input-image "${NREL_ERF_IMAGE}" --batch-size 4`
 
 ### NREL ConvNeXt-Large
 
-- [ ] `python train.py --config configs/nrel_convnext_large.yaml`
-- [ ] `RUN_DIR=$(ls -td results/nrel/convnext_large_large_* | head -1)`
-- [ ] `python evaluate.py --config configs/nrel_convnext_large.yaml --checkpoint "${RUN_DIR}/best.ckpt"`
-- [ ] `python evaluate_efficiency.py --config configs/nrel_convnext_large.yaml --checkpoint "${RUN_DIR}/best.ckpt" --batch-size 4 --output "${RUN_DIR}/efficiency_report.json"`
-- [ ] `python utils/visualize_erf.py --config configs/nrel_convnext_large.yaml --checkpoint "${RUN_DIR}/best.ckpt" --input-image "${NREL_ERF_IMAGE}" --output "${RUN_DIR}/erf_overlay.png"`
+- [ ] `"${PYTHON_BIN}" scripts/train.py --config configs/nrel_convnext_large.yaml --comment "nrel_convnext_large_baseline"`
+- [ ] `RUN_DIR=$(ls -td results/nrel/convnext_large_large_nrel_convnext_large_baseline_* | head -1)`
+- [ ] `"${PYTHON_BIN}" scripts/postprocess.py --config configs/nrel_convnext_large.yaml --run-dir "${RUN_DIR}" --input-image "${NREL_ERF_IMAGE}" --batch-size 4`
 
-### NREL Swin-T
+### NREL Swin-Tiny
 
-- [ ] `python train.py --config configs/nrel_swin_tiny.yaml`
-- [ ] `RUN_DIR=$(ls -td results/nrel/swin_tiny_patch4_window7_224_tiny_* | head -1)`
-- [ ] `python evaluate.py --config configs/nrel_swin_tiny.yaml --checkpoint "${RUN_DIR}/best.ckpt"`
-- [ ] `python evaluate_efficiency.py --config configs/nrel_swin_tiny.yaml --checkpoint "${RUN_DIR}/best.ckpt" --batch-size 4 --output "${RUN_DIR}/efficiency_report.json"`
-- [ ] `python utils/visualize_erf.py --config configs/nrel_swin_tiny.yaml --checkpoint "${RUN_DIR}/best.ckpt" --input-image "${NREL_ERF_IMAGE}" --output "${RUN_DIR}/erf_overlay.png"`
+- [ ] `"${PYTHON_BIN}" scripts/train.py --config configs/nrel_swin_tiny.yaml --comment "nrel_swin_tiny_baseline"`
+- [ ] `RUN_DIR=$(ls -td results/nrel/swin_tiny_patch4_window7_224_tiny_nrel_swin_tiny_baseline_* | head -1)`
+- [ ] `"${PYTHON_BIN}" scripts/postprocess.py --config configs/nrel_swin_tiny.yaml --run-dir "${RUN_DIR}" --input-image "${NREL_ERF_IMAGE}" --batch-size 4`
 
-### NREL Swin-S
+### NREL Swin-Small
 
-- [ ] `python train.py --config configs/nrel_swin_small.yaml`
-- [ ] `RUN_DIR=$(ls -td results/nrel/swin_small_patch4_window7_224_small_* | head -1)`
-- [ ] `python evaluate.py --config configs/nrel_swin_small.yaml --checkpoint "${RUN_DIR}/best.ckpt"`
-- [ ] `python evaluate_efficiency.py --config configs/nrel_swin_small.yaml --checkpoint "${RUN_DIR}/best.ckpt" --batch-size 4 --output "${RUN_DIR}/efficiency_report.json"`
-- [ ] `python utils/visualize_erf.py --config configs/nrel_swin_small.yaml --checkpoint "${RUN_DIR}/best.ckpt" --input-image "${NREL_ERF_IMAGE}" --output "${RUN_DIR}/erf_overlay.png"`
+- [ ] `"${PYTHON_BIN}" scripts/train.py --config configs/nrel_swin_small.yaml --comment "nrel_swin_small_baseline"`
+- [ ] `RUN_DIR=$(ls -td results/nrel/swin_small_patch4_window7_224_small_nrel_swin_small_baseline_* | head -1)`
+- [ ] `"${PYTHON_BIN}" scripts/postprocess.py --config configs/nrel_swin_small.yaml --run-dir "${RUN_DIR}" --input-image "${NREL_ERF_IMAGE}" --batch-size 4`
 
-### NREL Swin-B
+### NREL Swin-Base
 
-- [ ] `python train.py --config configs/nrel_swin_base.yaml`
-- [ ] `RUN_DIR=$(ls -td results/nrel/swin_base_patch4_window7_224_base_* | head -1)`
-- [ ] `python evaluate.py --config configs/nrel_swin_base.yaml --checkpoint "${RUN_DIR}/best.ckpt"`
-- [ ] `python evaluate_efficiency.py --config configs/nrel_swin_base.yaml --checkpoint "${RUN_DIR}/best.ckpt" --batch-size 4 --output "${RUN_DIR}/efficiency_report.json"`
-- [ ] `python utils/visualize_erf.py --config configs/nrel_swin_base.yaml --checkpoint "${RUN_DIR}/best.ckpt" --input-image "${NREL_ERF_IMAGE}" --output "${RUN_DIR}/erf_overlay.png"`
+- [ ] `"${PYTHON_BIN}" scripts/train.py --config configs/nrel_swin_base.yaml --comment "nrel_swin_base_baseline"`
+- [ ] `RUN_DIR=$(ls -td results/nrel/swin_base_patch4_window7_224_base_nrel_swin_base_baseline_* | head -1)`
+- [ ] `"${PYTHON_BIN}" scripts/postprocess.py --config configs/nrel_swin_base.yaml --run-dir "${RUN_DIR}" --input-image "${NREL_ERF_IMAGE}" --batch-size 4`
 
 ## Stage 4: NREL Mamba Sweep
 
-### NREL VMamba-T
+### NREL VMamba-Tiny
 
-- [ ] `python train.py --config configs/nrel_vmamba_tiny.yaml`
-- [ ] `RUN_DIR=$(ls -td results/nrel/vmamba_tiny_* | head -1)`
-- [ ] `python evaluate.py --config configs/nrel_vmamba_tiny.yaml --checkpoint "${RUN_DIR}/best.ckpt"`
-- [ ] `python evaluate_efficiency.py --config configs/nrel_vmamba_tiny.yaml --checkpoint "${RUN_DIR}/best.ckpt" --batch-size 4 --output "${RUN_DIR}/efficiency_report.json"`
-- [ ] `python utils/visualize_erf.py --config configs/nrel_vmamba_tiny.yaml --checkpoint "${RUN_DIR}/best.ckpt" --input-image "${NREL_ERF_IMAGE}" --output "${RUN_DIR}/erf_overlay.png"`
+- [ ] `"${PYTHON_BIN}" scripts/train.py --config configs/nrel_vmamba_tiny.yaml --comment "nrel_vmamba_tiny_baseline"`
+- [ ] `RUN_DIR=$(ls -td results/nrel/vmamba_tiny_nrel_vmamba_tiny_baseline_* | head -1)`
+- [ ] `"${PYTHON_BIN}" scripts/postprocess.py --config configs/nrel_vmamba_tiny.yaml --run-dir "${RUN_DIR}" --input-image "${NREL_ERF_IMAGE}" --batch-size 4`
 
-### NREL VMamba-S
+### NREL VMamba-Small
 
-- [ ] `python train.py --config configs/nrel_vmamba_small.yaml`
-- [ ] `RUN_DIR=$(ls -td results/nrel/vmamba_small_* | head -1)`
-- [ ] `python evaluate.py --config configs/nrel_vmamba_small.yaml --checkpoint "${RUN_DIR}/best.ckpt"`
-- [ ] `python evaluate_efficiency.py --config configs/nrel_vmamba_small.yaml --checkpoint "${RUN_DIR}/best.ckpt" --batch-size 4 --output "${RUN_DIR}/efficiency_report.json"`
-- [ ] `python utils/visualize_erf.py --config configs/nrel_vmamba_small.yaml --checkpoint "${RUN_DIR}/best.ckpt" --input-image "${NREL_ERF_IMAGE}" --output "${RUN_DIR}/erf_overlay.png"`
+- [ ] `"${PYTHON_BIN}" scripts/train.py --config configs/nrel_vmamba_small.yaml --comment "nrel_vmamba_small_baseline"`
+- [ ] `RUN_DIR=$(ls -td results/nrel/vmamba_small_nrel_vmamba_small_baseline_* | head -1)`
+- [ ] `"${PYTHON_BIN}" scripts/postprocess.py --config configs/nrel_vmamba_small.yaml --run-dir "${RUN_DIR}" --input-image "${NREL_ERF_IMAGE}" --batch-size 4`
 
-### NREL VMamba-B
+### NREL VMamba-Base
 
-- [ ] `python train.py --config configs/nrel_vmamba_base.yaml`
-- [ ] `RUN_DIR=$(ls -td results/nrel/vmamba_base_* | head -1)`
-- [ ] `python evaluate.py --config configs/nrel_vmamba_base.yaml --checkpoint "${RUN_DIR}/best.ckpt"`
-- [ ] `python evaluate_efficiency.py --config configs/nrel_vmamba_base.yaml --checkpoint "${RUN_DIR}/best.ckpt" --batch-size 4 --output "${RUN_DIR}/efficiency_report.json"`
-- [ ] `python utils/visualize_erf.py --config configs/nrel_vmamba_base.yaml --checkpoint "${RUN_DIR}/best.ckpt" --input-image "${NREL_ERF_IMAGE}" --output "${RUN_DIR}/erf_overlay.png"`
+- [ ] `"${PYTHON_BIN}" scripts/train.py --config configs/nrel_vmamba_base.yaml --comment "nrel_vmamba_base_baseline"`
+- [ ] `RUN_DIR=$(ls -td results/nrel/vmamba_base_nrel_vmamba_base_baseline_* | head -1)`
+- [ ] `"${PYTHON_BIN}" scripts/postprocess.py --config configs/nrel_vmamba_base.yaml --run-dir "${RUN_DIR}" --input-image "${NREL_ERF_IMAGE}" --batch-size 4`
 
-### NREL Spatial-Mamba-T
+### NREL Spatial-Mamba-Tiny
 
-- [ ] `python train.py --config configs/nrel_spatial_mamba_tiny.yaml`
-- [ ] `RUN_DIR=$(ls -td results/nrel/spatial_mamba_tiny_* | head -1)`
-- [ ] `python evaluate.py --config configs/nrel_spatial_mamba_tiny.yaml --checkpoint "${RUN_DIR}/best.ckpt"`
-- [ ] `python evaluate_efficiency.py --config configs/nrel_spatial_mamba_tiny.yaml --checkpoint "${RUN_DIR}/best.ckpt" --batch-size 4 --output "${RUN_DIR}/efficiency_report.json"`
-- [ ] `python utils/visualize_erf.py --config configs/nrel_spatial_mamba_tiny.yaml --checkpoint "${RUN_DIR}/best.ckpt" --input-image "${NREL_ERF_IMAGE}" --output "${RUN_DIR}/erf_overlay.png"`
+- [ ] `"${PYTHON_BIN}" scripts/train.py --config configs/nrel_spatial_mamba_tiny.yaml --comment "nrel_spatial_mamba_tiny_baseline"`
+- [ ] `RUN_DIR=$(ls -td results/nrel/spatial_mamba_tiny_nrel_spatial_mamba_tiny_baseline_* | head -1)`
+- [ ] `"${PYTHON_BIN}" scripts/postprocess.py --config configs/nrel_spatial_mamba_tiny.yaml --run-dir "${RUN_DIR}" --input-image "${NREL_ERF_IMAGE}" --batch-size 4`
 
-### NREL Spatial-Mamba-S
+### NREL Spatial-Mamba-Small
 
-- [ ] `python train.py --config configs/nrel_spatial_mamba_small.yaml`
-- [ ] `RUN_DIR=$(ls -td results/nrel/spatial_mamba_small_* | head -1)`
-- [ ] `python evaluate.py --config configs/nrel_spatial_mamba_small.yaml --checkpoint "${RUN_DIR}/best.ckpt"`
-- [ ] `python evaluate_efficiency.py --config configs/nrel_spatial_mamba_small.yaml --checkpoint "${RUN_DIR}/best.ckpt" --batch-size 4 --output "${RUN_DIR}/efficiency_report.json"`
-- [ ] `python utils/visualize_erf.py --config configs/nrel_spatial_mamba_small.yaml --checkpoint "${RUN_DIR}/best.ckpt" --input-image "${NREL_ERF_IMAGE}" --output "${RUN_DIR}/erf_overlay.png"`
+- [ ] `"${PYTHON_BIN}" scripts/train.py --config configs/nrel_spatial_mamba_small.yaml --comment "nrel_spatial_mamba_small_baseline"`
+- [ ] `RUN_DIR=$(ls -td results/nrel/spatial_mamba_small_nrel_spatial_mamba_small_baseline_* | head -1)`
+- [ ] `"${PYTHON_BIN}" scripts/postprocess.py --config configs/nrel_spatial_mamba_small.yaml --run-dir "${RUN_DIR}" --input-image "${NREL_ERF_IMAGE}" --batch-size 4`
 
-### NREL Spatial-Mamba-B
+### NREL Spatial-Mamba-Base
 
-- [ ] `python train.py --config configs/nrel_spatial_mamba_base.yaml`
-- [ ] `RUN_DIR=$(ls -td results/nrel/spatial_mamba_base_* | head -1)`
-- [ ] `python evaluate.py --config configs/nrel_spatial_mamba_base.yaml --checkpoint "${RUN_DIR}/best.ckpt"`
-- [ ] `python evaluate_efficiency.py --config configs/nrel_spatial_mamba_base.yaml --checkpoint "${RUN_DIR}/best.ckpt" --batch-size 4 --output "${RUN_DIR}/efficiency_report.json"`
-- [ ] `python utils/visualize_erf.py --config configs/nrel_spatial_mamba_base.yaml --checkpoint "${RUN_DIR}/best.ckpt" --input-image "${NREL_ERF_IMAGE}" --output "${RUN_DIR}/erf_overlay.png"`
+- [ ] `"${PYTHON_BIN}" scripts/train.py --config configs/nrel_spatial_mamba_base.yaml --comment "nrel_spatial_mamba_base_baseline"`
+- [ ] `RUN_DIR=$(ls -td results/nrel/spatial_mamba_base_nrel_spatial_mamba_base_baseline_* | head -1)`
+- [ ] `"${PYTHON_BIN}" scripts/postprocess.py --config configs/nrel_spatial_mamba_base.yaml --run-dir "${RUN_DIR}" --input-image "${NREL_ERF_IMAGE}" --batch-size 4`
 
-### NREL MambaVision-T
+### NREL MambaVision-Tiny
 
-- [ ] `python train.py --config configs/nrel_mambavision_tiny.yaml`
-- [ ] `RUN_DIR=$(ls -td results/nrel/mambavision_tiny_* | head -1)`
-- [ ] `python evaluate.py --config configs/nrel_mambavision_tiny.yaml --checkpoint "${RUN_DIR}/best.ckpt"`
-- [ ] `python evaluate_efficiency.py --config configs/nrel_mambavision_tiny.yaml --checkpoint "${RUN_DIR}/best.ckpt" --batch-size 4 --output "${RUN_DIR}/efficiency_report.json"`
-- [ ] `python utils/visualize_erf.py --config configs/nrel_mambavision_tiny.yaml --checkpoint "${RUN_DIR}/best.ckpt" --input-image "${NREL_ERF_IMAGE}" --output "${RUN_DIR}/erf_overlay.png"`
+- [ ] `"${PYTHON_BIN}" scripts/train.py --config configs/nrel_mambavision_tiny.yaml --comment "nrel_mambavision_tiny_baseline"`
+- [ ] `RUN_DIR=$(ls -td results/nrel/mambavision_tiny_nrel_mambavision_tiny_baseline_* | head -1)`
+- [ ] `"${PYTHON_BIN}" scripts/postprocess.py --config configs/nrel_mambavision_tiny.yaml --run-dir "${RUN_DIR}" --input-image "${NREL_ERF_IMAGE}" --batch-size 4`
 
-### NREL MambaVision-T2
+### NREL MambaVision-Tiny2
 
-- [ ] `python train.py --config configs/nrel_mambavision_tiny2.yaml`
-- [ ] `RUN_DIR=$(ls -td results/nrel/mambavision_tiny2_* | head -1)`
-- [ ] `python evaluate.py --config configs/nrel_mambavision_tiny2.yaml --checkpoint "${RUN_DIR}/best.ckpt"`
-- [ ] `python evaluate_efficiency.py --config configs/nrel_mambavision_tiny2.yaml --checkpoint "${RUN_DIR}/best.ckpt" --batch-size 4 --output "${RUN_DIR}/efficiency_report.json"`
-- [ ] `python utils/visualize_erf.py --config configs/nrel_mambavision_tiny2.yaml --checkpoint "${RUN_DIR}/best.ckpt" --input-image "${NREL_ERF_IMAGE}" --output "${RUN_DIR}/erf_overlay.png"`
+- [ ] `"${PYTHON_BIN}" scripts/train.py --config configs/nrel_mambavision_tiny2.yaml --comment "nrel_mambavision_tiny2_baseline"`
+- [ ] `RUN_DIR=$(ls -td results/nrel/mambavision_tiny2_nrel_mambavision_tiny2_baseline_* | head -1)`
+- [ ] `"${PYTHON_BIN}" scripts/postprocess.py --config configs/nrel_mambavision_tiny2.yaml --run-dir "${RUN_DIR}" --input-image "${NREL_ERF_IMAGE}" --batch-size 4`
 
-### NREL MambaVision-S
+### NREL MambaVision-Small
 
-- [ ] `python train.py --config configs/nrel_mambavision_small.yaml`
-- [ ] `RUN_DIR=$(ls -td results/nrel/mambavision_small_* | head -1)`
-- [ ] `python evaluate.py --config configs/nrel_mambavision_small.yaml --checkpoint "${RUN_DIR}/best.ckpt"`
-- [ ] `python evaluate_efficiency.py --config configs/nrel_mambavision_small.yaml --checkpoint "${RUN_DIR}/best.ckpt" --batch-size 4 --output "${RUN_DIR}/efficiency_report.json"`
-- [ ] `python utils/visualize_erf.py --config configs/nrel_mambavision_small.yaml --checkpoint "${RUN_DIR}/best.ckpt" --input-image "${NREL_ERF_IMAGE}" --output "${RUN_DIR}/erf_overlay.png"`
+- [ ] `"${PYTHON_BIN}" scripts/train.py --config configs/nrel_mambavision_small.yaml --comment "nrel_mambavision_small_baseline"`
+- [ ] `RUN_DIR=$(ls -td results/nrel/mambavision_small_nrel_mambavision_small_baseline_* | head -1)`
+- [ ] `"${PYTHON_BIN}" scripts/postprocess.py --config configs/nrel_mambavision_small.yaml --run-dir "${RUN_DIR}" --input-image "${NREL_ERF_IMAGE}" --batch-size 4`
 
-### NREL MambaVision-B
+### NREL MambaVision-Base
 
-- [ ] `python train.py --config configs/nrel_mambavision_base.yaml`
-- [ ] `RUN_DIR=$(ls -td results/nrel/mambavision_base_* | head -1)`
-- [ ] `python evaluate.py --config configs/nrel_mambavision_base.yaml --checkpoint "${RUN_DIR}/best.ckpt"`
-- [ ] `python evaluate_efficiency.py --config configs/nrel_mambavision_base.yaml --checkpoint "${RUN_DIR}/best.ckpt" --batch-size 4 --output "${RUN_DIR}/efficiency_report.json"`
-- [ ] `python utils/visualize_erf.py --config configs/nrel_mambavision_base.yaml --checkpoint "${RUN_DIR}/best.ckpt" --input-image "${NREL_ERF_IMAGE}" --output "${RUN_DIR}/erf_overlay.png"`
+- [ ] `"${PYTHON_BIN}" scripts/train.py --config configs/nrel_mambavision_base.yaml --comment "nrel_mambavision_base_baseline"`
+- [ ] `RUN_DIR=$(ls -td results/nrel/mambavision_base_nrel_mambavision_base_baseline_* | head -1)`
+- [ ] `"${PYTHON_BIN}" scripts/postprocess.py --config configs/nrel_mambavision_base.yaml --run-dir "${RUN_DIR}" --input-image "${NREL_ERF_IMAGE}" --batch-size 4`
 
-### NREL MambaVision-L
+### NREL MambaVision-Large
 
-- [ ] `python train.py --config configs/nrel_mambavision_large.yaml`
-- [ ] `RUN_DIR=$(ls -td results/nrel/mambavision_large_* | head -1)`
-- [ ] `python evaluate.py --config configs/nrel_mambavision_large.yaml --checkpoint "${RUN_DIR}/best.ckpt"`
-- [ ] `python evaluate_efficiency.py --config configs/nrel_mambavision_large.yaml --checkpoint "${RUN_DIR}/best.ckpt" --batch-size 4 --output "${RUN_DIR}/efficiency_report.json"`
-- [ ] `python utils/visualize_erf.py --config configs/nrel_mambavision_large.yaml --checkpoint "${RUN_DIR}/best.ckpt" --input-image "${NREL_ERF_IMAGE}" --output "${RUN_DIR}/erf_overlay.png"`
+- [ ] `"${PYTHON_BIN}" scripts/train.py --config configs/nrel_mambavision_large.yaml --comment "nrel_mambavision_large_baseline"`
+- [ ] `RUN_DIR=$(ls -td results/nrel/mambavision_large_nrel_mambavision_large_baseline_* | head -1)`
+- [ ] `"${PYTHON_BIN}" scripts/postprocess.py --config configs/nrel_mambavision_large.yaml --run-dir "${RUN_DIR}" --input-image "${NREL_ERF_IMAGE}" --batch-size 4`
 
-### NREL MambaVision-L2
+### NREL MambaVision-Large2
 
-- [ ] `python train.py --config configs/nrel_mambavision_large2.yaml`
-- [ ] `RUN_DIR=$(ls -td results/nrel/mambavision_large2_* | head -1)`
-- [ ] `python evaluate.py --config configs/nrel_mambavision_large2.yaml --checkpoint "${RUN_DIR}/best.ckpt"`
-- [ ] `python evaluate_efficiency.py --config configs/nrel_mambavision_large2.yaml --checkpoint "${RUN_DIR}/best.ckpt" --batch-size 4 --output "${RUN_DIR}/efficiency_report.json"`
-- [ ] `python utils/visualize_erf.py --config configs/nrel_mambavision_large2.yaml --checkpoint "${RUN_DIR}/best.ckpt" --input-image "${NREL_ERF_IMAGE}" --output "${RUN_DIR}/erf_overlay.png"`
+- [ ] `"${PYTHON_BIN}" scripts/train.py --config configs/nrel_mambavision_large2.yaml --comment "nrel_mambavision_large2_baseline"`
+- [ ] `RUN_DIR=$(ls -td results/nrel/mambavision_large2_nrel_mambavision_large2_baseline_* | head -1)`
+- [ ] `"${PYTHON_BIN}" scripts/postprocess.py --config configs/nrel_mambavision_large2.yaml --run-dir "${RUN_DIR}" --input-image "${NREL_ERF_IMAGE}" --batch-size 4`
+
+## Optional Validation-Only Check
+
+If you need validation metrics without rerunning efficiency or ERF:
+
+```bash
+"${PYTHON_BIN}" scripts/postprocess.py \
+  --config <CONFIG_PATH> \
+  --run-dir "${RUN_DIR}" \
+  --split val \
+  --skip-efficiency \
+  --skip-erf
+```
 
 ## Centralized Result Logger
 
-Copy final numbers from `test_metrics.json` and `efficiency_report.json` into this table after each finished run.
+Copy values from each run directory into this table.
 
-| Dataset | Backbone | Scale | Config | Run Dir | RMSE | nRMSE | MAE | MBE | R2 | FS | Params (M) | FLOPs (G) | FPS | ERF | Notes |
-|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|
-| Folsom | ConvNeXt | Tiny | `configs/folsom_convnext_tiny.yaml` | `results/folsom/convnext_tiny_tiny_*` |  |  |  |  |  |  |  |  |  |  |  |
-| Folsom | ConvNeXt | Small | `configs/folsom_convnext_small.yaml` | `results/folsom/convnext_small_small_*` |  |  |  |  |  |  |  |  |  |  |  |
-| Folsom | ConvNeXt | Base | `configs/folsom_convnext_base.yaml` | `results/folsom/convnext_base_base_*` |  |  |  |  |  |  |  |  |  |  |  |
-| Folsom | ConvNeXt | Large | `configs/folsom_convnext_large.yaml` | `results/folsom/convnext_large_large_*` |  |  |  |  |  |  |  |  |  |  |  |
-| Folsom | Swin | Tiny | `configs/folsom_swin_tiny.yaml` | `results/folsom/swin_tiny_patch4_window7_224_tiny_*` |  |  |  |  |  |  |  |  |  |  |  |
-| Folsom | Swin | Small | `configs/folsom_swin_small.yaml` | `results/folsom/swin_small_patch4_window7_224_small_*` |  |  |  |  |  |  |  |  |  |  |  |
-| Folsom | Swin | Base | `configs/folsom_swin_base.yaml` | `results/folsom/swin_base_patch4_window7_224_base_*` |  |  |  |  |  |  |  |  |  |  |  |
-| Folsom | VMamba | Tiny | `configs/folsom_vmamba_tiny.yaml` | `results/folsom/vmamba_tiny_*` |  |  |  |  |  |  |  |  |  |  |  |
-| Folsom | VMamba | Small | `configs/folsom_vmamba_small.yaml` | `results/folsom/vmamba_small_*` |  |  |  |  |  |  |  |  |  |  |  |
-| Folsom | VMamba | Base | `configs/folsom_vmamba_base.yaml` | `results/folsom/vmamba_base_*` |  |  |  |  |  |  |  |  |  |  |  |
-| Folsom | Spatial-Mamba | Tiny | `configs/folsom_spatial_mamba_tiny.yaml` | `results/folsom/spatial_mamba_tiny_*` |  |  |  |  |  |  |  |  |  |  |  |
-| Folsom | Spatial-Mamba | Small | `configs/folsom_spatial_mamba_small.yaml` | `results/folsom/spatial_mamba_small_*` |  |  |  |  |  |  |  |  |  |  |  |
-| Folsom | Spatial-Mamba | Base | `configs/folsom_spatial_mamba_base.yaml` | `results/folsom/spatial_mamba_base_*` |  |  |  |  |  |  |  |  |  |  |  |
-| Folsom | MambaVision | Tiny | `configs/folsom_mambavision_tiny.yaml` | `results/folsom/mambavision_tiny_*` |  |  |  |  |  |  |  |  |  |  |  |
-| Folsom | MambaVision | Tiny2 | `configs/folsom_mambavision_tiny2.yaml` | `results/folsom/mambavision_tiny2_*` |  |  |  |  |  |  |  |  |  |  |  |
-| Folsom | MambaVision | Small | `configs/folsom_mambavision_small.yaml` | `results/folsom/mambavision_small_*` |  |  |  |  |  |  |  |  |  |  |  |
-| Folsom | MambaVision | Base | `configs/folsom_mambavision_base.yaml` | `results/folsom/mambavision_base_*` |  |  |  |  |  |  |  |  |  |  |  |
-| Folsom | MambaVision | Large | `configs/folsom_mambavision_large.yaml` | `results/folsom/mambavision_large_*` |  |  |  |  |  |  |  |  |  |  |  |
-| Folsom | MambaVision | Large2 | `configs/folsom_mambavision_large2.yaml` | `results/folsom/mambavision_large2_*` |  |  |  |  |  |  |  |  |  |  |  |
-| NREL | ConvNeXt | Tiny | `configs/nrel_convnext_tiny.yaml` | `results/nrel/convnext_tiny_tiny_*` |  |  |  |  |  |  |  |  |  |  |  |
-| NREL | ConvNeXt | Small | `configs/nrel_convnext_small.yaml` | `results/nrel/convnext_small_small_*` |  |  |  |  |  |  |  |  |  |  |  |
-| NREL | ConvNeXt | Base | `configs/nrel_convnext_base.yaml` | `results/nrel/convnext_base_base_*` |  |  |  |  |  |  |  |  |  |  |  |
-| NREL | ConvNeXt | Large | `configs/nrel_convnext_large.yaml` | `results/nrel/convnext_large_large_*` |  |  |  |  |  |  |  |  |  |  |  |
-| NREL | Swin | Tiny | `configs/nrel_swin_tiny.yaml` | `results/nrel/swin_tiny_patch4_window7_224_tiny_*` |  |  |  |  |  |  |  |  |  |  |  |
-| NREL | Swin | Small | `configs/nrel_swin_small.yaml` | `results/nrel/swin_small_patch4_window7_224_small_*` |  |  |  |  |  |  |  |  |  |  |  |
-| NREL | Swin | Base | `configs/nrel_swin_base.yaml` | `results/nrel/swin_base_patch4_window7_224_base_*` |  |  |  |  |  |  |  |  |  |  |  |
-| NREL | VMamba | Tiny | `configs/nrel_vmamba_tiny.yaml` | `results/nrel/vmamba_tiny_*` |  |  |  |  |  |  |  |  |  |  |  |
-| NREL | VMamba | Small | `configs/nrel_vmamba_small.yaml` | `results/nrel/vmamba_small_*` |  |  |  |  |  |  |  |  |  |  |  |
-| NREL | VMamba | Base | `configs/nrel_vmamba_base.yaml` | `results/nrel/vmamba_base_*` |  |  |  |  |  |  |  |  |  |  |  |
-| NREL | Spatial-Mamba | Tiny | `configs/nrel_spatial_mamba_tiny.yaml` | `results/nrel/spatial_mamba_tiny_*` |  |  |  |  |  |  |  |  |  |  |  |
-| NREL | Spatial-Mamba | Small | `configs/nrel_spatial_mamba_small.yaml` | `results/nrel/spatial_mamba_small_*` |  |  |  |  |  |  |  |  |  |  |  |
-| NREL | Spatial-Mamba | Base | `configs/nrel_spatial_mamba_base.yaml` | `results/nrel/spatial_mamba_base_*` |  |  |  |  |  |  |  |  |  |  |  |
-| NREL | MambaVision | Tiny | `configs/nrel_mambavision_tiny.yaml` | `results/nrel/mambavision_tiny_*` |  |  |  |  |  |  |  |  |  |  |  |
-| NREL | MambaVision | Tiny2 | `configs/nrel_mambavision_tiny2.yaml` | `results/nrel/mambavision_tiny2_*` |  |  |  |  |  |  |  |  |  |  |  |
-| NREL | MambaVision | Small | `configs/nrel_mambavision_small.yaml` | `results/nrel/mambavision_small_*` |  |  |  |  |  |  |  |  |  |  |  |
-| NREL | MambaVision | Base | `configs/nrel_mambavision_base.yaml` | `results/nrel/mambavision_base_*` |  |  |  |  |  |  |  |  |  |  |  |
-| NREL | MambaVision | Large | `configs/nrel_mambavision_large.yaml` | `results/nrel/mambavision_large_*` |  |  |  |  |  |  |  |  |  |  |  |
-| NREL | MambaVision | Large2 | `configs/nrel_mambavision_large2.yaml` | `results/nrel/mambavision_large2_*` |  |  |  |  |  |  |  |  |  |  |  |
+| Date | Dataset | Backbone | Scale | Config | Run Dir | Train/Val Years | Test Year | RMSE | nRMSE | MAE | MBE | R2 | FS | Params (M) | FLOPs (G) | FPS | ERF Path | Notes |
+|---|---|---|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|
+| YYYY-MM-DD | Folsom or NREL | ConvNeXt / Swin / VMamba / Spatial-Mamba / MambaVision | Tiny / Small / Base / Large / Tiny2 / Large2 | `configs/...yaml` | `results/...` | `2014-2015` or `2018-2019` | `2016` or `2020` |  |  |  |  |  |  |  |  |  | `results/.../erf_overlay.png` |  |

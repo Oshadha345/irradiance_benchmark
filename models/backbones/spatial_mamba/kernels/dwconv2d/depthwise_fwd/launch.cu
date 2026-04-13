@@ -1,4 +1,5 @@
 #include <ATen/ATen.h>
+#include <ATen/core/grad_mode.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <THC/THCAtomics.cuh>
 #include <iostream>

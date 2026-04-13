@@ -1,45 +1,64 @@
+from __future__ import annotations
+
+from typing import Any, Dict
+
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
-class LadderFusion(nn.Module):
-    """Temporal-conditioned channel gating for spatial visual features."""
-    def __init__(self, visual_channels, temporal_channels):
+from .heads import BaselineRegressionHead
+from .temporal import BaselineTemporalEncoder
+from .wrappers import build_visual_encoder
+
+
+class ConcatenationFusion(nn.Module):
+    """Fuse visual and temporal descriptors with direct concatenation."""
+
+    def __init__(self, visual_dim: int, temporal_dim: int) -> None:
         super().__init__()
-        self.project = nn.Linear(temporal_channels, visual_channels)
-        self.sigmoid = nn.Sigmoid()
+        self.visual_dim = int(visual_dim)
+        self.temporal_dim = int(temporal_dim)
+        self.output_dim = self.visual_dim + self.temporal_dim
 
-    def forward(self, visual, temporal):
-        temp_proj = self.project(temporal) # (B, C_v)
-        temp_proj = temp_proj.view(temp_proj.shape[0], temp_proj.shape[1], 1, 1)
-        gate = self.sigmoid(temp_proj)
-        return visual * gate + visual
+    def forward(self, visual_features: torch.Tensor, temporal_features: torch.Tensor) -> torch.Tensor:
+        if visual_features.ndim != 2:
+            raise ValueError(f"Expected visual_features with shape (B, Dv), got {tuple(visual_features.shape)}.")
+        if temporal_features.ndim != 2:
+            raise ValueError(f"Expected temporal_features with shape (B, Dt), got {tuple(temporal_features.shape)}.")
+        if visual_features.shape[0] != temporal_features.shape[0]:
+            raise ValueError(
+                "Visual and temporal batches must match: "
+                f"{visual_features.shape[0]} vs {temporal_features.shape[0]}."
+            )
+        return torch.cat([visual_features, temporal_features], dim=1)
 
-class LearnableFusionMatrix(nn.Module):
-    """Physics-Aware Mixing Matrix discovering cross-level relationships."""
-    def __init__(self, num_levels=4, visual_dims=[256, 512, 1024, 1024], temporal_dim=128, fused_dim=128):
+
+class BaselineFusionModel(nn.Module):
+    """Double-blind MERCon baseline model."""
+
+    def __init__(self, config: Dict[str, Any]) -> None:
         super().__init__()
-        self.num_levels = num_levels
-        self.mixing_weights = nn.Parameter(torch.eye(num_levels))
-        
-        self.visual_projs = nn.ModuleList([
-            nn.Sequential(
-                nn.Conv2d(dim, fused_dim, kernel_size=1),
-                nn.AdaptiveAvgPool2d(1),
-                nn.Flatten()
-            ) for dim in visual_dims
-        ])
-        self.temporal_projs = nn.ModuleList([nn.Linear(temporal_dim, fused_dim) for _ in range(num_levels)])
-        self.norm = nn.LayerNorm(fused_dim)
+        model_cfg = config["model"]
+        visual_feature_dim = int(model_cfg.get("visual_feature_dim", 1024))
+        temporal_hidden_dim = int(model_cfg.get("temporal_hidden_dim", 128))
 
-    def forward(self, visual_feats, temporal_feats):
-        v_vecs = [self.visual_projs[i](feat) for i, feat in enumerate(visual_feats)]
-        V_stack = torch.stack(v_vecs, dim=1) # (B, 4, Fused_Dim)
-        W = F.softmax(self.mixing_weights, dim=1)
-        V_mixed = torch.einsum('tv, bvd -> btd', W, V_stack)
-        
-        fused_outputs = []
-        for i in range(self.num_levels):
-            out = self.norm(self.temporal_projs[i](temporal_feats[i]) + V_mixed[:, i, :])
-            fused_outputs.append(out)
-        return fused_outputs, W
+        self.visual_encoder = build_visual_encoder(config)
+        self.temporal_encoder = BaselineTemporalEncoder.from_config(config)
+        self.fusion = ConcatenationFusion(
+            visual_dim=visual_feature_dim,
+            temporal_dim=temporal_hidden_dim,
+        )
+        self.head = BaselineRegressionHead.from_config(
+            config,
+            input_dim=self.fusion.output_dim,
+        )
+
+    def forward(
+        self,
+        image: torch.Tensor,
+        weather_sequence: torch.Tensor,
+    ) -> tuple[torch.Tensor, None]:
+        visual_features = self.visual_encoder(image)
+        temporal_features = self.temporal_encoder(weather_sequence)
+        fused_features = self.fusion(visual_features, temporal_features)
+        prediction = self.head(fused_features)
+        return prediction, None

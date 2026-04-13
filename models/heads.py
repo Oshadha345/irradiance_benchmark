@@ -1,56 +1,48 @@
 from __future__ import annotations
 
+from typing import Any, Dict
+
 import torch
 import torch.nn as nn
 
 
-class MLPHead(nn.Module):
-    """Compact forecast head used after visual-temporal fusion."""
+class BaselineRegressionHead(nn.Module):
+    """Map the concatenated visual-temporal vector to a single 10-minute forecast."""
 
     def __init__(
         self,
         input_dim: int,
-        hidden_dim: int,
-        output_dim: int,
+        hidden_dim: int = 256,
         dropout: float = 0.3,
+        output_dim: int = 1,
     ) -> None:
         super().__init__()
+        self.input_dim = int(input_dim)
+        self.hidden_dim = int(hidden_dim)
+        self.output_dim = int(output_dim)
+        self.dropout = float(dropout)
+
         self.layers = nn.Sequential(
-            nn.LayerNorm(input_dim),
-            nn.Dropout(dropout),
-            nn.Linear(input_dim, hidden_dim),
+            nn.LayerNorm(self.input_dim),
+            nn.Linear(self.input_dim, self.hidden_dim),
             nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, output_dim),
+            nn.Dropout(self.dropout),
+            nn.Linear(self.hidden_dim, self.output_dim),
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.layers(x)
+    @classmethod
+    def from_config(cls, config: Dict[str, Any], *, input_dim: int) -> "BaselineRegressionHead":
+        model_cfg = config["model"]
+        return cls(
+            input_dim=input_dim,
+            hidden_dim=int(model_cfg.get("head_hidden_dim", 256)),
+            dropout=float(model_cfg.get("dropout", 0.3)),
+            output_dim=int(model_cfg.get("output_dim", 1)),
+        )
 
-
-class SpaceTimeDecoder(nn.Module):
-    """Auxiliary decoder for next-frame supervision."""
-
-    def __init__(self, input_dim: int, output_channels: int = 3) -> None:
-        super().__init__()
-        self.reduce = nn.Conv2d(input_dim, 256, kernel_size=1)
-
-        def up_block(in_channels: int, out_channels: int) -> nn.Sequential:
-            return nn.Sequential(
-                nn.ConvTranspose2d(in_channels, out_channels, kernel_size=4, stride=2, padding=1),
-                nn.BatchNorm2d(out_channels),
-                nn.ReLU(inplace=True),
+    def forward(self, fused_features: torch.Tensor) -> torch.Tensor:
+        if fused_features.ndim != 2:
+            raise ValueError(
+                f"Expected fused_features with shape (B, D), got {tuple(fused_features.shape)}."
             )
-
-        self.up1 = up_block(256, 128)
-        self.up2 = up_block(128, 64)
-        self.up3 = up_block(64, 32)
-        self.final = nn.Conv2d(32, output_channels, kernel_size=1)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.reduce(x)
-        x = self.up1(x)
-        x = self.up2(x)
-        x = self.up3(x)
-        return self.final(x)
-
+        return self.layers(fused_features)

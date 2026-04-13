@@ -1,29 +1,44 @@
+from __future__ import annotations
+
+from typing import Any, Dict
+
 import torch
 import torch.nn as nn
 
-class PyramidTCN(nn.Module):
-    """Multi-scale temporal convolutions extracting hierarchical physics context."""
-    def __init__(self, input_channels=7, embedding_dim=128):
-        super().__init__()
-        self.embedding = nn.Linear(input_channels, embedding_dim)
-        
-        def make_branch(k, p):
-            return nn.Sequential(
-                nn.Conv1d(embedding_dim, embedding_dim, kernel_size=k, padding=p),
-                nn.ReLU(),
-                nn.AdaptiveAvgPool1d(1)
-            )
-            
-        self.branch1 = make_branch(3, 1)
-        self.branch2 = make_branch(5, 2)
-        self.branch3 = make_branch(7, 3)
-        self.branch4 = make_branch(9, 4)
 
-    def forward(self, x):
-        x = self.embedding(x).permute(0, 2, 1) # (B, Emb, T)
-        return [
-            self.branch1(x).squeeze(-1),
-            self.branch2(x).squeeze(-1),
-            self.branch3(x).squeeze(-1),
-            self.branch4(x).squeeze(-1)
-        ]
+class BaselineTemporalEncoder(nn.Module):
+    """Encode the 40x7 weather history with a single-layer LSTM."""
+
+    def __init__(
+        self,
+        input_dim: int = 7,
+        hidden_dim: int = 128,
+        num_layers: int = 1,
+    ) -> None:
+        super().__init__()
+        self.input_dim = int(input_dim)
+        self.hidden_dim = int(hidden_dim)
+        self.num_layers = int(num_layers)
+        self.lstm = nn.LSTM(
+            input_size=self.input_dim,
+            hidden_size=self.hidden_dim,
+            num_layers=self.num_layers,
+            batch_first=True,
+        )
+
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> "BaselineTemporalEncoder":
+        model_cfg = config["model"]
+        return cls(
+            input_dim=int(model_cfg.get("temporal_channels", 7)),
+            hidden_dim=int(model_cfg.get("temporal_hidden_dim", 128)),
+            num_layers=int(model_cfg.get("temporal_num_layers", 1)),
+        )
+
+    def forward(self, weather_sequence: torch.Tensor) -> torch.Tensor:
+        if weather_sequence.ndim != 3:
+            raise ValueError(
+                f"Expected weather_sequence with shape (B, T, C), got {tuple(weather_sequence.shape)}."
+            )
+        _, (hidden_state, _) = self.lstm(weather_sequence)
+        return hidden_state[-1]

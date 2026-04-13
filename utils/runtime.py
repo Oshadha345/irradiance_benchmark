@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import random
+import re
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
@@ -30,6 +31,10 @@ def load_config(path: str | Path) -> Dict[str, Any]:
         config = yaml.safe_load(handle)
 
     config["visual"]["weight_path"] = _resolve_if_relative(config_path.parent, config["visual"].get("weight_path"))
+    # The double-blind MERCon baseline uses a fixed 40-step temporal window across datasets.
+    config.setdefault("data", {})
+    config.setdefault("model", {})
+    config["data"]["sequence_length"] = int(config["model"].get("baseline_sequence_length", 40))
     return config
 
 
@@ -59,11 +64,25 @@ def model_slug(config: Dict[str, Any]) -> str:
     return f"{model_name}_{scale}"
 
 
-def create_run_dir(config: Dict[str, Any], output_root: str | Path | None = None) -> Path:
+def slugify_comment(comment: str) -> str:
+    slug = re.sub(r"[^A-Za-z0-9]+", "_", comment.strip()).strip("_").lower()
+    return slug
+
+
+def create_run_dir(
+    config: Dict[str, Any],
+    output_root: str | Path | None = None,
+    comment: str | None = None,
+) -> Path:
     dataset = str(config["data"]["dataset_type"]).lower()
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     root = Path(output_root or PROJECT_ROOT / "results")
-    run_dir = root / dataset / f"{model_slug(config)}_{timestamp}"
+    parts = [model_slug(config)]
+    comment_slug = slugify_comment(comment or "")
+    if comment_slug:
+        parts.append(comment_slug)
+    parts.append(timestamp)
+    run_dir = root / dataset / "_".join(parts)
     run_dir.mkdir(parents=True, exist_ok=False)
     return run_dir
 

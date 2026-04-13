@@ -1,25 +1,46 @@
-# SolarMamba Benchmarking Suite
+# MERCon 2026 Irradiance Baseline Benchmark
 
 [![License: TBD](https://img.shields.io/badge/license-TBD-lightgrey.svg)](#)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.x-ee4c2c.svg)](https://pytorch.org/)
 
-Unified PyTorch benchmarking code for **MERCon 2026** experiments on multi-modal solar irradiance forecasting. The repository standardizes a 4-stage visual pyramid interface over **VMamba**, **MambaVision**, **Spatial-Mamba**, **ConvNeXt**, and **Swin**, then plugs each backbone into the existing **SolarMamba** temporal pathway and **Ladder Fusion** design.
+Unified PyTorch benchmark code for a double-blind **MERCon 2026** submission on multi-modal solar irradiance forecasting.
+
+The current repository state implements a strict baseline:
+- visual backbone -> 4-stage features -> GAP/project -> `1024`-D visual vector
+- temporal history -> `40 x 7` sequence -> `1`-layer `LSTM(128)`
+- fusion -> concatenation -> `LayerNorm -> Linear -> GELU -> Dropout(0.3) -> Linear`
+- target -> single `10`-minute clear-sky index forecast
 
 > Paper / abstract placeholder: `TBD`
 
-## What This Repo Does
+## Benchmark Contract
 
-- Reuses the original **Folsom** and **NREL** dataloaders from SolarMamba.
-- Preserves the temporal branch with **PyramidTCN**.
-- Preserves the fusion interface with **LadderFusion** and keeps **matrix fusion** available as an ablation.
-- Unifies all visual encoders to a standardized pyramid: `[(64, H/4), (128, H/8), (256, H/16), (512, H/32)]`.
-- Produces conference-friendly artifacts per run:
-  - `config.json`
-  - `best.ckpt`
-  - `history.json`
-  - `best_val_metrics.json`
-  - `test_metrics.json`
+- All backbones expose the same flat visual descriptor shape: `(B, 1024)`.
+- The temporal branch is fixed to a `40`-step, `7`-channel input window.
+- `train.py` automatically chooses batch size by scale:
+  - `tiny -> 64`
+  - `small -> 32`
+  - `base -> 16`
+  - `large / large2 -> 8`
+- Evaluation is single-horizon only:
+  - `RMSE`
+  - `nRMSE`
+  - `MAE`
+  - `MBE`
+  - `R2`
+  - `FS`
+
+## Chronological Splits
+
+- `Folsom`
+  - training/validation years: `2014-2015`
+  - test year: `2016`
+- `NREL`
+  - training/validation years: `2018-2019`
+  - test year: `2020`
+
+The NREL split is `2018-2020` rather than `2017-2019` because the enforced `40`-step history window and image-availability filter make `2018` the first valid benchmark year block in the current data path. Train/test boundaries remain chronological, and normalization statistics are recomputed from train/validation years only.
 
 ## Directory Tree
 
@@ -40,10 +61,11 @@ irradiance_benchmark/
 │   │   ├── spatial_mamba/
 │   │   └── vmamba/
 │   ├── fusion.py
-│   ├── heads.py
 │   ├── model.py
-│   ├── temporal.py
 │   └── wrappers.py
+├── scripts/
+│   ├── postprocess.py
+│   └── train.py
 ├── utils/
 │   ├── metrics.py
 │   ├── pipeline.py
@@ -56,115 +78,105 @@ irradiance_benchmark/
 └── train.py
 ```
 
-## Setup Roadmap
+## Setup
 
-1. Activate a Python environment with **PyTorch 2.2+** and CUDA support if you plan to use the Mamba backbones.
-2. Run the bootstrap script from the repository root:
+Run from the repo root:
 
 ```bash
+cd /storage2/CV_Irradiance/Mercon_Mamba/irradiance_benchmark
+
+export PYTHONNOUSERSITE=1
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export CUDA_VISIBLE_DEVICES=1
+export PYTHON_BIN=/userhomes/shehan15/miniconda3/envs/solarmamba_train_1/bin/python
+
+PYTHONNOUSERSITE=1 \
+PYTHON_BIN="${PYTHON_BIN}" \
+SKIP_PYTHON_DEPS=1 \
 bash setup.sh
 ```
 
 `setup.sh` will:
+- refresh vendored backbone source files under `models/backbones/`
+- rebuild Spatial-Mamba kernels when needed
+- download local checkpoints for VMamba, MambaVision, Spatial-Mamba, and Swin
+- leave ConvNeXt on the normal `timm` pretrained path
 
-- install benchmark dependencies,
-- download the official backbone definition files into `models/backbones/`,
-- build the required **Spatial-Mamba** custom kernels in-place,
-- download local ImageNet-1K pretrained checkpoints for **VMamba**, **MambaVision**, **Spatial-Mamba**, and **Swin-T/S/B** into `weights/`,
-- leave **ConvNeXt** on the `timm` code path, so its pretrained weights are resolved through the normal `timm` cache on first use.
+## Train And Postprocess
 
-If your environment already has the required Python packages and your system `nvcc` does not match `torch.version.cuda`, rerun bootstrap without touching the environment or forcing a failing Spatial-Mamba build:
+The full ordered roadmap is in [docs/EXPERIMENT_PLAN.md](docs/EXPERIMENT_PLAN.md).
 
-```bash
-SKIP_PYTHON_DEPS=1 SKIP_SPATIAL_MAMBA_BUILD=1 bash setup.sh
-```
-
-Example: a `torch==2.5.1+cu121` environment paired with `/usr/bin/nvcc` from CUDA 11.5 cannot compile the Spatial-Mamba extensions. In that case, the rest of the benchmark remains usable, but Spatial-Mamba runs must wait until a CUDA 12.1 toolkit is available and exported through `CUDA_HOME`.
-
-## Experiment Roadmap
-
-The full ordered experiment checklist lives in [docs/EXPERIMENT_PLAN.md](docs/EXPERIMENT_PLAN.md). It includes:
-
-- the exact train/eval/efficiency/ERF commands for every config in this repo,
-- a staged roadmap starting from Folsom baselines and moving to the full Folsom/NREL sweep,
-- a centralized markdown logger you can keep updating after each finished run.
-
-Minimal example:
-
-```bash
-python train.py --config configs/folsom_vmamba_tiny.yaml
-RUN_DIR=$(ls -td results/folsom/vmamba_tiny_* | head -1)
-python evaluate.py --config configs/folsom_vmamba_tiny.yaml --checkpoint "${RUN_DIR}/best.ckpt"
-python evaluate_efficiency.py --config configs/folsom_vmamba_tiny.yaml --checkpoint "${RUN_DIR}/best.ckpt" --batch-size 4 --output "${RUN_DIR}/efficiency_report.json"
-```
-
-ERF example with dataset-specific images:
+Set the ERF images once per shell:
 
 ```bash
 export FOLSOM_ERF_IMAGE="/storage2/CV_Irradiance/datasets/1_Folsom/2014/04/04/20140404_010659.jpg"
 export NREL_ERF_IMAGE="/storage2/CV_Irradiance/datasets/4_NREL/2019_09_07/images/UTC-7_2019_09_07-09_50_22_530200.jpg"
 ```
 
+Example Folsom run:
+
+```bash
+"${PYTHON_BIN}" scripts/train.py \
+  --config configs/folsom_convnext_tiny.yaml \
+  --comment "folsom_convnext_tiny_baseline"
+
+RUN_DIR=$(ls -td results/folsom/convnext_tiny_tiny_folsom_convnext_tiny_baseline_* | head -1)
+
+"${PYTHON_BIN}" scripts/postprocess.py \
+  --config configs/folsom_convnext_tiny.yaml \
+  --run-dir "${RUN_DIR}" \
+  --input-image "${FOLSOM_ERF_IMAGE}" \
+  --batch-size 4
+```
+
+`scripts/postprocess.py` runs:
+- checkpoint evaluation on the test split
+- efficiency measurement
+- ERF generation
+
+## Outputs
+
 Each run creates:
 
 ```text
-results/[dataset]/[model_name]_[scale]_[timestamp]/
+results/[dataset]/[model_slug]_[comment]_[timestamp]/
 ```
 
-## Metrics
-
-Implemented in [utils/metrics.py](utils/metrics.py):
-
-- `RMSE`
-- `nRMSE`
-- `MAE`
-- `MBE`
-- `R^2`
-- `FS` relative to a persistence baseline
-
-Both per-horizon and flattened `overall` summaries are emitted in JSON form.
-
-## Notes on the Visual Backbone Interface
-
-- **Swin** and **ConvNeXt** are instantiated through `timm` with `features_only=True`.
-- **VMamba**, **MambaVision**, and **Spatial-Mamba** are wrapped from local vendored official code under `models/backbones/`.
-- Every encoder is projected to the same channel pyramid: `[64, 128, 256, 512]`.
-- This keeps the downstream **Ladder Fusion** branch fixed while swapping only the visual backbone.
-
-## Results Layout
-
-Example:
+Typical contents:
 
 ```text
-results/folsom/vmamba_tiny_20260413_120000/
+results/folsom/convnext_tiny_tiny_folsom_convnext_tiny_baseline_20260413_120000/
 ├── best.ckpt
 ├── best_val_metrics.json
 ├── config.json
 ├── config.yaml
+├── efficiency_report.json
+├── erf_overlay.png
 ├── history.json
 ├── last.ckpt
 └── test_metrics.json
 ```
 
-## Centralized Result Logger
+## Centralized Log
 
-The maintained research log now lives in [docs/EXPERIMENT_PLAN.md](docs/EXPERIMENT_PLAN.md#centralized-result-logger). Update that table after each experiment so the run history stays in one place.
+The experiment checklist and centralized result table live in [docs/EXPERIMENT_PLAN.md](docs/EXPERIMENT_PLAN.md#centralized-result-logger).
 
 ## BibTeX
 
 ```bibtex
-@misc{mercon2026_solarmamba_benchmark,
-  title   = {SolarMamba Benchmarking Suite},
+@misc{mercon2026_irradiance_baseline_benchmark,
+  title   = {MERCon 2026 Irradiance Baseline Benchmark},
   author  = {TBD},
   year    = {2026},
   note    = {Code release for the MERCon 2026 submission}
 }
 ```
 
-## Acknowledgment
+## Backbone Sources
 
-This benchmark reuses the SolarMamba temporal/data pipeline and plugs in official visual backbones from:
+Official backbone implementations used in this benchmark:
 
 - `MzeroMiko/VMamba`
 - `NVlabs/MambaVision`
 - `EdwardChasel/Spatial-Mamba`
+- `timm` for `ConvNeXt` and `Swin`

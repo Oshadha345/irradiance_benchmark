@@ -2,7 +2,19 @@ import torch
 import torch.nn as nn
 from einops import rearrange
 from timm.models.layers import to_2tuple
-import selective_scan_cuda_oflex_rh
+try:
+    import selective_scan_cuda_oflex_rh
+except ImportError as exc:
+    selective_scan_cuda_oflex_rh = None
+    _MISSING_SELECTIVE_SCAN_IMPORT_ERROR = exc
+
+
+def _require_selective_scan_extension():
+    if selective_scan_cuda_oflex_rh is None:
+        raise RuntimeError(
+            "Spatial-Mamba selective_scan_cuda_oflex_rh is unavailable. Rebuild the kernels with setup.sh using a CUDA toolkit that matches torch.version.cuda."
+        ) from _MISSING_SELECTIVE_SCAN_IMPORT_ERROR
+
 
 def print_jit_input_names(inputs):
     print("input params: ", end=" ", flush=True)
@@ -72,6 +84,7 @@ class SelectiveScanStateFn(torch.autograd.Function):
             B = rearrange(B, "b dstate l -> b 1 dstate l")
             ctx.squeeze_B = True
 
+        _require_selective_scan_extension()
         out, x, *rest = selective_scan_cuda_oflex_rh.fwd(u, delta, A, B, D, delta_bias, delta_softplus, 1, True)
         ctx.delta_softplus = delta_softplus
         ctx.has_z = z is not None
@@ -97,6 +110,7 @@ class SelectiveScanStateFn(torch.autograd.Function):
         # The kernel supports passing in a pre-allocated dz (e.g., in case we want to fuse the
         # backward of selective_scan_cuda with the backward of chunk).
         # Here we just pass in None and dz will be allocated in the C++ code.
+        _require_selective_scan_extension()
         du, ddelta, dA, dB, dD, ddelta_bias, *rest = selective_scan_cuda_oflex_rh.bwd(
             u, delta, A, B, D, delta_bias, dout, x, ctx.delta_softplus, 1
         )
