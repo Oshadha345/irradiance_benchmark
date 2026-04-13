@@ -109,7 +109,10 @@ def load_checkpoint(
     *,
     map_location: str | torch.device = "cpu",
 ) -> Dict[str, Any]:
-    checkpoint = torch.load(checkpoint_path, map_location=map_location)
+    try:
+        checkpoint = torch.load(checkpoint_path, map_location=map_location, weights_only=False)
+    except TypeError:
+        checkpoint = torch.load(checkpoint_path, map_location=map_location)
     state_dict = extract_state_dict(checkpoint)
     incompatible = model.load_state_dict(state_dict, strict=False)
     return {

@@ -74,7 +74,7 @@ def load_image(path: str | Path, image_size: int) -> tuple[torch.Tensor, np.ndar
         (center[0] - mask_radius, center[1] - mask_radius, center[0] + mask_radius, center[1] + mask_radius),
         fill=255,
     )
-    image_np = np.asarray(image)
+    image_np = np.array(image, copy=True)
     image_np[np.asarray(mask) == 0] = 0
     image = Image.fromarray(image_np)
     image_np = np.asarray(image, dtype=np.float32) / 255.0

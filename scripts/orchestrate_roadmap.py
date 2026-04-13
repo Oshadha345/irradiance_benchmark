@@ -64,6 +64,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--roadmap", type=str, default="docs/EXPERIMENT_PLAN.md", help="Markdown roadmap containing train commands.")
     parser.add_argument("--python-bin", type=str, default=os.environ.get("PYTHON_BIN") or sys.executable, help="Python interpreter used for train/postprocess.")
     parser.add_argument("--gpu-index", type=int, default=1, help="GPU index to reserve exclusively for the roadmap.")
+    parser.add_argument("--gpu-poll-seconds", type=float, default=1.0, help="How frequently to poll for GPU idleness while waiting to acquire the target GPU.")
     parser.add_argument("--budget-hours", type=float, default=72.0, help="Total wall-clock budget allocated to all remaining experiments.")
     parser.add_argument("--planned-epochs", type=int, default=8, help="Planned epochs per experiment used when deriving the max epoch-time budget.")
     parser.add_argument("--min-epochs", type=int, default=3, help="Minimum number of epochs to allow before convergence/budget stopping.")
@@ -185,7 +186,7 @@ def is_run_complete(run_dir: Path) -> bool:
 
 
 def run_has_training_artifacts(run_dir: Path) -> bool:
-    return (run_dir / "best.ckpt").is_file() and any(
+    return (run_dir / "best.ckpt").is_file() and (run_dir / "status.json").is_file() and any(
         candidate.is_file() for candidate in (run_dir / "config.yaml", run_dir / "config.json")
     )
 
@@ -316,6 +317,56 @@ def build_window_candidates(trainval_times: list[pd.Timestamp], fractions: list[
     return candidates
 
 
+def dataset_policy_from_config(config: dict[str, Any], profile: dict[str, Any] | None = None) -> dict[str, Any]:
+    policy = {
+        "split_windows": deepcopy(config["data"].get("split_windows")),
+        "train_stride": int(config["data"].get("train_stride", 1)),
+        "val_stride": int(config["data"].get("val_stride", 1)),
+        "test_stride": int(config["data"].get("test_stride", 1)),
+    }
+    if profile:
+        policy["window_fraction"] = profile.get("window_fraction")
+        policy["trainval_end"] = profile.get("trainval_end")
+    return policy
+
+
+def apply_dataset_policy(config: dict[str, Any], dataset_policy: dict[str, Any]) -> dict[str, Any]:
+    candidate = deepcopy(config)
+    split_windows = deepcopy(dataset_policy.get("split_windows"))
+    if split_windows:
+        candidate["data"]["split_windows"] = split_windows
+    else:
+        candidate["data"].pop("split_windows", None)
+    candidate["data"]["train_stride"] = int(dataset_policy.get("train_stride", 1))
+    candidate["data"]["val_stride"] = int(dataset_policy.get("val_stride", 1))
+    candidate["data"]["test_stride"] = int(dataset_policy.get("test_stride", 1))
+    return candidate
+
+
+def bootstrap_dataset_policies(state: dict[str, Any]) -> None:
+    policies = state.setdefault("dataset_policies", {})
+    if policies:
+        return
+    for payload in state.get("experiments", {}).values():
+        if payload.get("status") != "completed":
+            continue
+        dataset = payload.get("dataset")
+        if not dataset or dataset in policies:
+            continue
+        config_candidates: list[Path] = []
+        tuned_config_path = payload.get("tuned_config_path")
+        if tuned_config_path:
+            config_candidates.append(Path(tuned_config_path))
+        run_dir_value = payload.get("run_dir")
+        if run_dir_value:
+            run_dir = Path(run_dir_value)
+            config_candidates.extend([run_dir / "config.yaml", run_dir / "config.json"])
+        for candidate in config_candidates:
+            if candidate.is_file():
+                policies[dataset] = dataset_policy_from_config(load_config(candidate), profile=payload.get("profile"))
+                break
+
+
 def profile_candidate(config: dict[str, Any], *, profile_steps: int, profile_warmup_steps: int, device: torch.device) -> dict[str, Any]:
     profile_config = deepcopy(config)
     seed_everything(int(profile_config["training"].get("seed", 42)))
@@ -427,7 +478,29 @@ def tune_experiment(
     device: torch.device,
     budget: TimeBudget,
     args: argparse.Namespace,
+    dataset_policy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    if dataset_policy is not None:
+        candidate = apply_dataset_policy(base_config, dataset_policy)
+        candidate["training"]["auto_batch_size"] = True
+        profile = profile_candidate(
+            candidate,
+            profile_steps=args.profile_steps,
+            profile_warmup_steps=args.profile_warmup_steps,
+            device=device,
+        )
+        profile["window_fraction"] = dataset_policy.get("window_fraction")
+        profile["train_stride"] = int(candidate["data"].get("train_stride", 1))
+        profile["trainval_end"] = dataset_policy.get("trainval_end")
+        tuned = apply_budget_controls(candidate, profile=profile, budget=budget, args=args)
+        return {
+            "config": tuned,
+            "profile": profile,
+            "budget": asdict(budget),
+            "selection_reason": "shared_dataset_policy",
+            "dataset_policy": dataset_policy_from_config(tuned, profile=profile),
+        }
+
     split_metadata = extract_split_metadata(base_config)
     fractions = parse_fraction_list(args.window_fractions)
     strides = parse_int_list(args.train_strides)
@@ -473,6 +546,7 @@ def tune_experiment(
                     "profile": profile,
                     "budget": asdict(budget),
                     "selection_reason": "first_candidate_within_epoch_budget",
+                    "dataset_policy": dataset_policy_from_config(tuned, profile=profile),
                 }
 
     if fallback is None:
@@ -482,6 +556,7 @@ def tune_experiment(
         "profile": fallback[1],
         "budget": fallback[2],
         "selection_reason": "fallback_fastest_candidate",
+        "dataset_policy": dataset_policy_from_config(fallback[0], profile=fallback[1]),
     }
 
 
@@ -652,6 +727,10 @@ def maybe_mark_existing_run(
     if not existing.is_dir():
         return False
     if run_has_training_artifacts(existing) and not is_run_complete(existing):
+        state.setdefault("dataset_policies", {}).setdefault(
+            spec.dataset,
+            dataset_policy_from_config(load_config(resolve_run_config_path(existing, fallback=spec.config_path))),
+        )
         state["experiments"][spec.experiment_id] = {
             "status": "needs_postprocess",
             "dataset": spec.dataset,
@@ -665,6 +744,10 @@ def maybe_mark_existing_run(
     if not is_run_complete(existing):
         return False
 
+    state.setdefault("dataset_policies", {}).setdefault(
+        spec.dataset,
+        dataset_policy_from_config(load_config(resolve_run_config_path(existing, fallback=spec.config_path))),
+    )
     summary = summarize_run(existing)
     state["experiments"][spec.experiment_id] = {
         "status": "completed",
@@ -690,6 +773,7 @@ def main() -> None:
     experiments = parse_roadmap(roadmap_path)
     state = read_state(state_path)
     state.setdefault("experiments", {})
+    bootstrap_dataset_policies(state)
     state["roadmap"] = str(roadmap_path)
     state["budget_hours"] = args.budget_hours
     state["gpu_index"] = args.gpu_index
@@ -722,7 +806,7 @@ def main() -> None:
         f"cuda_visible_devices={os.environ.get('CUDA_VISIBLE_DEVICES') or '<all>'}"
     )
 
-    with exclusive_gpu(physical_gpu_index):
+    with exclusive_gpu(physical_gpu_index, poll_seconds=args.gpu_poll_seconds):
         os.environ.setdefault("PYTHONNOUSERSITE", "1")
         for index, spec in enumerate(pending, start=1):
             base_config = load_config(spec.config_path)
@@ -751,6 +835,10 @@ def main() -> None:
                 }
             write_state(state, state_path)
 
+            run_dir: Path | None = None
+            tuned_config_path: Path | None = None
+            tuned: dict[str, Any] | None = None
+            profile: dict[str, Any] | None = None
             try:
                 existing_entry = state["experiments"].get(spec.experiment_id, {})
                 if existing_entry.get("status") == "needs_postprocess" and existing_entry.get("run_dir"):
@@ -795,9 +883,20 @@ def main() -> None:
                     write_summary_artifacts(state, summary_dir)
                     continue
 
-                tuned = tune_experiment(spec, base_config, device=device, budget=budget, args=args)
+                shared_policy = state.setdefault("dataset_policies", {}).get(spec.dataset)
+                tuned = tune_experiment(
+                    spec,
+                    base_config,
+                    device=device,
+                    budget=budget,
+                    args=args,
+                    dataset_policy=shared_policy,
+                )
                 tuned_config_path = write_tuned_config(spec, tuned["config"], generated_config_dir)
                 profile = tuned["profile"]
+                if shared_policy is None:
+                    state["dataset_policies"][spec.dataset] = tuned["dataset_policy"]
+                    write_state(state, state_path)
 
                 env = os.environ.copy()
                 env["CUDA_VISIBLE_DEVICES"] = str(physical_gpu_index)
@@ -856,15 +955,36 @@ def main() -> None:
                 write_state(state, state_path)
                 write_summary_artifacts(state, summary_dir)
             except Exception as exc:
-                state["experiments"][spec.experiment_id] = {
-                    "status": "failed",
-                    "dataset": spec.dataset,
-                    "model": spec.model,
-                    "comment": spec.comment,
-                    "config_path": str(spec.config_path),
-                    "error": str(exc),
-                    "failed_at": datetime.now().isoformat(),
-                }
+                resumable_postprocess = run_dir is not None and run_dir.is_dir() and run_has_training_artifacts(run_dir) and not is_run_complete(run_dir)
+                if resumable_postprocess:
+                    state["experiments"][spec.experiment_id] = {
+                        "status": "needs_postprocess",
+                        "dataset": spec.dataset,
+                        "model": spec.model,
+                        "comment": spec.comment,
+                        "config_path": str(spec.config_path),
+                        "run_dir": str(run_dir),
+                        "tuned_config_path": None if tuned_config_path is None else str(tuned_config_path),
+                        "budget": None if tuned is None else tuned["budget"],
+                        "profile": profile,
+                        "selection_reason": "resume_postprocess_after_failure" if tuned is None else tuned["selection_reason"],
+                        "last_error": str(exc),
+                        "failed_at": datetime.now().isoformat(),
+                    }
+                else:
+                    state["experiments"][spec.experiment_id] = {
+                        "status": "failed",
+                        "dataset": spec.dataset,
+                        "model": spec.model,
+                        "comment": spec.comment,
+                        "config_path": str(spec.config_path),
+                        "run_dir": None if run_dir is None else str(run_dir),
+                        "tuned_config_path": None if tuned_config_path is None else str(tuned_config_path),
+                        "budget": None if tuned is None else tuned["budget"],
+                        "profile": profile,
+                        "error": str(exc),
+                        "failed_at": datetime.now().isoformat(),
+                    }
                 write_state(state, state_path)
                 write_summary_artifacts(state, summary_dir)
                 raise
