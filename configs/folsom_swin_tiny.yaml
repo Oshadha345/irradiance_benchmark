@@ -11,8 +11,8 @@ data:
   years: [2014]
   sampling_rate_sec: 60
   sequence_length: 40
-  image_size: 512
-  batch_size: 8
+  image_size: 224
+  batch_size: 16
   num_workers: 8
 
 visual:

@@ -11,8 +11,8 @@ data:
   years: [2017, 2018, 2019, 2020, 2021, 2022]
   sampling_rate_sec: 600
   sequence_length: 4
-  image_size: 512
-  batch_size: 8
+  image_size: 224
+  batch_size: 4
   num_workers: 8
   rebuild_image_cache: false
 

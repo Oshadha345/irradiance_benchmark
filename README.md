@@ -18,13 +18,8 @@ The current repository state implements a strict baseline:
 
 - All backbones expose the same flat visual descriptor shape: `(B, 1024)`.
 - The temporal branch is fixed to a `40`-step, `7`-channel input window.
-- `train.py` automatically chooses batch size by scale:
-  - `tiny -> 64`
-  - `small -> 32`
-  - `base -> 16`
-  - `large / large2 -> 8`
-- Training commands do not need a batch-size flag.
-  `train.py` overrides the training dataloader batch size internally.
+- Training should be launched through `bash scripts/train_exclusive.sh ...` so GPU `1` is used by one benchmark job at a time.
+- `train.py` probes the active GPU, picks the fastest safe batch size from a conservative candidate set, and prints the final batch count.
 - The `--batch-size` flag on `scripts/postprocess.py` is only for the efficiency/FPS benchmark.
   Its default is `4`.
 - Evaluation is single-horizon only:
@@ -91,7 +86,6 @@ cd /storage2/CV_Irradiance/Mercon_Mamba/irradiance_benchmark
 
 export PYTHONNOUSERSITE=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-export CUDA_VISIBLE_DEVICES=1
 export PYTHON_BIN=/userhomes/shehan15/miniconda3/envs/solarmamba_train_1/bin/python
 
 PYTHONNOUSERSITE=1 \
@@ -105,6 +99,26 @@ bash setup.sh
 - rebuild Spatial-Mamba kernels when needed
 - download local checkpoints for VMamba, MambaVision, Spatial-Mamba, and Swin
 - leave ConvNeXt on the normal `timm` pretrained path
+
+## Roadmap Orchestrator
+
+Run the full benchmark queue one experiment at a time on GPU `1` with adaptive time-budget control:
+
+```bash
+PYTHON_BIN="${PYTHON_BIN}" \
+python scripts/orchestrate_roadmap.py \
+  --roadmap docs/EXPERIMENT_PLAN.md \
+  --gpu-index 1 \
+  --budget-hours 72
+```
+
+The orchestrator will:
+- serialize all train/postprocess work onto one GPU
+- probe the fastest safe batch size for each candidate configuration
+- shrink the training window to intermediate chronological cutoffs when a full epoch is too slow
+- cap epochs from the remaining wall-clock budget and stop early on convergence
+- reuse complete runs or training-only runs already present under `results/`
+- write resumable state plus summary CSV/plots under `results/orchestrator/`
 
 ## Train And Postprocess
 
@@ -120,7 +134,7 @@ export NREL_ERF_IMAGE="/storage2/CV_Irradiance/datasets/4_NREL/2019_09_07/images
 Example Folsom run:
 
 ```bash
-"${PYTHON_BIN}" scripts/train.py \
+GPU_INDEX=1 PYTHON_BIN="${PYTHON_BIN}" bash scripts/train_exclusive.sh \
   --config configs/folsom_convnext_tiny.yaml \
   --comment "folsom_convnext_tiny_baseline"
 

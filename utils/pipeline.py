@@ -72,7 +72,7 @@ def run_inference(
     pred_k, target_k, baseline_k = [], [], []
     pred_ghi, target_ghi, baseline_ghi = [], [], []
 
-    with torch.no_grad():
+    with torch.inference_mode():
         for batch in tqdm(dataloader, desc=desc, leave=False):
             batch = batch_to_device(batch, device)
             images, weather_seq, targets, ghi_cs = batch[:4]

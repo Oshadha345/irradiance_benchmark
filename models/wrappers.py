@@ -344,7 +344,7 @@ class MambaEncoderWrapper(BaseEncoderWrapper):
 def build_visual_encoder(config: Dict[str, Any]) -> BaseEncoderWrapper:
     visual_cfg = config["visual"]
     family = str(visual_cfg["family"]).lower()
-    image_size = int(config["data"].get("image_size", 512))
+    image_size = int(config["data"].get("image_size", 224))
     output_dim = int(config["model"].get("visual_feature_dim", 1024))
     model_kwargs = dict(visual_cfg.get("model_kwargs", {}))
 

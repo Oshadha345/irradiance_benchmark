@@ -11,6 +11,8 @@ from PIL import Image, ImageDraw, ImageFile
 import pvlib
 from datetime import datetime, timedelta
 
+from .chrono import filter_frame_to_windows, renormalize_on_window, resolve_split_windows, split_samples_by_windows
+
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 
@@ -60,15 +62,19 @@ class SolarDataset(Dataset):
         self.root_dir = config['data']['server_root'] if config['env'] == 'server' else config['data']['local_root']
         self.sequence_length = config['data']['sequence_length']
         self.sampling_rate = config['data']['sampling_rate_sec']
+        self.image_size = int(config['data'].get('image_size', 224))
         self.horizons = config['model']['horizons'] 
         self.csv_path = config['data'].get('csv_path')
         self.image_root = config['data'].get('image_root')
         self.image_tolerance = timedelta(seconds=config['data'].get('image_tolerance_sec', 120))
         self.use_aux = config['model'].get('use_aux_decoder', False)
         self.use_benchmark_split = bool(config['data'].get('enforce_benchmark_split', True))
+        self.split_windows = resolve_split_windows(config)
 
         self.df = self._load_all_data()
-        if config['data'].get('years') and not self.use_benchmark_split:
+        if self.split_windows is not None:
+            self.df = filter_frame_to_windows(self.df, self.split_windows)
+        elif config['data'].get('years') and not self.use_benchmark_split:
             self.df = self.df[self.df.index.year.isin(config['data']['years'])]
 
         self.lat, self.lon, self.alt = 38.642, -121.148, 60.0 
@@ -150,7 +156,9 @@ class SolarDataset(Dataset):
 
     def __len__(self): return len(self.samples)
 
-    def _process_image(self, path, size=(512, 512), mask_radius=250, is_target=False):
+    def _process_image(self, path, size=None, mask_radius=None, is_target=False):
+        size = size or (self.image_size, self.image_size)
+        mask_radius = max(1, int(round(min(size) * 250 / 512))) if mask_radius is None else mask_radius
         img = Image.open(path).convert('RGB').resize(size)
         mask = Image.new('L', size, 0)
         c = (size[0]//2, size[1]//2)
@@ -191,17 +199,42 @@ class SolarDataset(Dataset):
 def get_data_loaders(config):
     transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])])
     ds = SolarDataset(config, transform=transform)
+    val_split = float(config['training'].get('val_split', 0.1))
 
-    tr_idx, v_idx, t_idx, selected_years = _chronological_benchmark_split(
-        ds.samples,
-        val_split=float(config['training'].get('val_split', 0.1)),
-    )
-    _renormalize_on_trainval_years(ds, trainval_years=set(selected_years[:2]))
-    print(f"[split][folsom] train/val years={selected_years[:2]} test year={selected_years[2]}")
+    if ds.split_windows is not None:
+        tr_idx, v_idx, t_idx, split_summary = split_samples_by_windows(ds.samples, ds.split_windows, val_split=val_split)
+        renormalize_on_window(ds, ds.split_windows.trainval_start, ds.split_windows.trainval_end)
+        print(f"[split][folsom] {split_summary}")
+    else:
+        tr_idx, v_idx, t_idx, selected_years = _chronological_benchmark_split(
+            ds.samples,
+            val_split=val_split,
+        )
+        _renormalize_on_trainval_years(ds, trainval_years=set(selected_years[:2]))
+        print(f"[split][folsom] train/val years={selected_years[:2]} test year={selected_years[2]}")
+
+    train_stride = max(1, int(config['data'].get('train_stride', 1)))
+    val_stride = max(1, int(config['data'].get('val_stride', 1)))
+    test_stride = max(1, int(config['data'].get('test_stride', 1)))
+    tr_idx = tr_idx[::train_stride]
+    v_idx = v_idx[::val_stride]
+    t_idx = t_idx[::test_stride]
 
     tr_ds = torch.utils.data.Subset(ds, tr_idx)
     v_ds = torch.utils.data.Subset(ds, v_idx)
     t_ds = torch.utils.data.Subset(ds, t_idx)
 
     bs, nw = config['data']['batch_size'], config['data']['num_workers']
-    return DataLoader(tr_ds, batch_size=bs, shuffle=True, num_workers=nw), DataLoader(v_ds, batch_size=bs, shuffle=False, num_workers=nw), DataLoader(t_ds, batch_size=bs, shuffle=False, num_workers=nw)
+    loader_kwargs = {
+        'num_workers': nw,
+        'pin_memory': torch.cuda.is_available(),
+    }
+    if nw > 0:
+        loader_kwargs['persistent_workers'] = True
+        loader_kwargs['prefetch_factor'] = int(config['data'].get('prefetch_factor', 4))
+
+    return (
+        DataLoader(tr_ds, batch_size=bs, shuffle=True, **loader_kwargs),
+        DataLoader(v_ds, batch_size=bs, shuffle=False, **loader_kwargs),
+        DataLoader(t_ds, batch_size=bs, shuffle=False, **loader_kwargs),
+    )

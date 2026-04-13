@@ -7,7 +7,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-from PIL import Image
+from PIL import Image, ImageDraw
 from torchvision import transforms
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -30,7 +30,17 @@ def parse_args() -> argparse.Namespace:
 
 
 def load_image(path: str | Path, image_size: int) -> tuple[torch.Tensor, np.ndarray]:
+    mask_radius = max(1, int(round(image_size * 250 / 512)))
     image = Image.open(path).convert("RGB").resize((image_size, image_size))
+    mask = Image.new("L", (image_size, image_size), 0)
+    center = (image_size // 2, image_size // 2)
+    ImageDraw.Draw(mask).ellipse(
+        (center[0] - mask_radius, center[1] - mask_radius, center[0] + mask_radius, center[1] + mask_radius),
+        fill=255,
+    )
+    image_np = np.asarray(image)
+    image_np[np.asarray(mask) == 0] = 0
+    image = Image.fromarray(image_np)
     image_np = np.asarray(image, dtype=np.float32) / 255.0
     tensor = transforms.Compose(
         [
@@ -49,7 +59,7 @@ def main() -> None:
     if args.checkpoint:
         load_checkpoint(model, args.checkpoint, map_location=device)
 
-    image_size = int(config["data"].get("image_size", 512))
+    image_size = int(config["data"].get("image_size", 224))
     image_tensor, image_np = load_image(args.input_image, image_size)
     image_tensor = image_tensor.to(device)
     image_tensor.requires_grad_(True)

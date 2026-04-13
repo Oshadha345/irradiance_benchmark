@@ -41,7 +41,7 @@ def main() -> None:
     if args.checkpoint:
         load_checkpoint(model, args.checkpoint, map_location=device)
 
-    image_size = int(config["data"].get("image_size", 512))
+    image_size = int(config["data"].get("image_size", 224))
     sequence_length = int(config["data"]["sequence_length"])
     temporal_channels = int(config["model"].get("temporal_channels", 7))
     images = torch.randn(args.batch_size, 3, image_size, image_size, device=device)
