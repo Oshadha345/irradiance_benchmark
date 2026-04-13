@@ -185,7 +185,18 @@ def is_run_complete(run_dir: Path) -> bool:
 
 
 def run_has_training_artifacts(run_dir: Path) -> bool:
-    return (run_dir / "best.ckpt").is_file() and (run_dir / "config.yaml").is_file()
+    return (run_dir / "best.ckpt").is_file() and any(
+        candidate.is_file() for candidate in (run_dir / "config.yaml", run_dir / "config.json")
+    )
+
+
+def resolve_run_config_path(run_dir: Path, fallback: Path | None = None) -> Path:
+    for candidate in (run_dir / "config.yaml", run_dir / "config.json"):
+        if candidate.is_file():
+            return candidate
+    if fallback is not None and fallback.is_file():
+        return fallback
+    raise FileNotFoundError(f"No run config found in {run_dir}")
 
 
 def resolve_input_image(dataset: str) -> str:
@@ -596,6 +607,8 @@ def maybe_mark_existing_run(
     existing = latest_matching_run(base_config, spec.comment)
     if existing is None:
         return False
+    if not existing.is_dir():
+        return False
     if run_has_training_artifacts(existing) and not is_run_complete(existing):
         state["experiments"][spec.experiment_id] = {
             "status": "needs_postprocess",
@@ -657,9 +670,14 @@ def main() -> None:
         return
 
     deadline = datetime.now() + timedelta(hours=float(args.budget_hours))
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    if device.type != "cuda":
+    if not torch.cuda.is_available():
         raise RuntimeError("The roadmap orchestrator expects a CUDA device.")
+    if args.gpu_index < 0 or args.gpu_index >= torch.cuda.device_count():
+        raise RuntimeError(
+            f"Requested gpu_index={args.gpu_index}, but only {torch.cuda.device_count()} CUDA device(s) are visible."
+        )
+    torch.cuda.set_device(args.gpu_index)
+    device = torch.device(f"cuda:{args.gpu_index}")
 
     with exclusive_gpu(args.gpu_index):
         os.environ.setdefault("PYTHONNOUSERSITE", "1")
@@ -694,6 +712,9 @@ def main() -> None:
                 existing_entry = state["experiments"].get(spec.experiment_id, {})
                 if existing_entry.get("status") == "needs_postprocess" and existing_entry.get("run_dir"):
                     run_dir = Path(existing_entry["run_dir"])
+                    if not run_dir.is_dir():
+                        raise FileNotFoundError(f"Saved run directory no longer exists: {run_dir}")
+                    run_config_path = resolve_run_config_path(run_dir, fallback=spec.config_path)
                     env = os.environ.copy()
                     env["CUDA_VISIBLE_DEVICES"] = str(args.gpu_index)
                     env["PYTHONNOUSERSITE"] = env.get("PYTHONNOUSERSITE", "1")
@@ -703,7 +724,7 @@ def main() -> None:
                             args.python_bin,
                             "scripts/postprocess.py",
                             "--config",
-                            str(run_dir / "config.yaml"),
+                            str(run_config_path),
                             "--run-dir",
                             str(run_dir),
                             "--input-image",
@@ -754,13 +775,14 @@ def main() -> None:
                 )
 
                 run_dir = locate_fresh_run(tuned["config"], spec.comment, train_started_at)
+                run_config_path = resolve_run_config_path(run_dir, fallback=tuned_config_path)
                 input_image = resolve_input_image(spec.dataset)
                 run_command(
                     [
                         args.python_bin,
                         "scripts/postprocess.py",
                         "--config",
-                        str(run_dir / "config.yaml"),
+                        str(run_config_path),
                         "--run-dir",
                         str(run_dir),
                         "--input-image",

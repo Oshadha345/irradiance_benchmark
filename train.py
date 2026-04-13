@@ -84,6 +84,15 @@ def synchronize_if_needed(device: torch.device) -> None:
         torch.cuda.synchronize(device)
 
 
+def snapshot_module_training_states(model: nn.Module) -> dict[int, bool]:
+    return {id(module): module.training for module in model.modules()}
+
+
+def restore_module_training_states(model: nn.Module, states: dict[int, bool]) -> None:
+    for module in model.modules():
+        module.train(states.get(id(module), True))
+
+
 def enable_fast_runtime_paths(device: torch.device) -> None:
     if hasattr(torch, "set_float32_matmul_precision"):
         torch.set_float32_matmul_precision("high")
@@ -210,56 +219,54 @@ def autotune_batch_size(
     best_batch_size = requested_batch_size
     best_samples_per_second = -1.0
     found_valid_candidate = False
-    original_mode = model.training
-    model.eval()
+    original_states = snapshot_module_training_states(model)
+    model.train()
 
-    for batch_size in candidates:
-        try:
-            torch.cuda.empty_cache()
-            synchronize_if_needed(device)
-            images = torch.randn(batch_size, 3, image_size, image_size, device=device)
-            weather = torch.randn(batch_size, sequence_length, temporal_channels, device=device)
-            targets = torch.randn(batch_size, 1, device=device)
-
-            for _ in range(probe_warmup):
-                model.zero_grad(set_to_none=True)
-                with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=amp_enabled):
-                    predictions, _ = model(images, weather)
-                    loss = F.huber_loss(predictions, targets, delta=delta)
-                loss.backward()
-
-            synchronize_if_needed(device)
-            start = time.perf_counter()
-            for _ in range(probe_iters):
-                model.zero_grad(set_to_none=True)
-                with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=amp_enabled):
-                    predictions, _ = model(images, weather)
-                    loss = F.huber_loss(predictions, targets, delta=delta)
-                loss.backward()
-            synchronize_if_needed(device)
-
-            elapsed = max(time.perf_counter() - start, 1e-8)
-            samples_per_second = float((batch_size * probe_iters) / elapsed)
-            print(f"[autotune] batch_size={batch_size} throughput={samples_per_second:.2f} samples/s")
-            found_valid_candidate = True
-            if (samples_per_second > best_samples_per_second * 1.01) or (
-                abs(samples_per_second - best_samples_per_second) <= 1e-6 and batch_size > best_batch_size
-            ):
-                best_batch_size = batch_size
-                best_samples_per_second = samples_per_second
-        except RuntimeError as exc:
-            if not is_cuda_oom(exc):
-                raise
-            print(f"[autotune] batch_size={batch_size} failed with CUDA OOM")
-        finally:
-            model.zero_grad(set_to_none=True)
-            if device.type == "cuda":
+    try:
+        for batch_size in candidates:
+            try:
                 torch.cuda.empty_cache()
+                synchronize_if_needed(device)
+                images = torch.randn(batch_size, 3, image_size, image_size, device=device)
+                weather = torch.randn(batch_size, sequence_length, temporal_channels, device=device)
+                targets = torch.randn(batch_size, 1, device=device)
 
-    if original_mode:
-        model.train()
-    else:
-        model.eval()
+                for _ in range(probe_warmup):
+                    model.zero_grad(set_to_none=True)
+                    with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=amp_enabled):
+                        predictions, _ = model(images, weather)
+                        loss = F.huber_loss(predictions, targets, delta=delta)
+                    loss.backward()
+
+                synchronize_if_needed(device)
+                start = time.perf_counter()
+                for _ in range(probe_iters):
+                    model.zero_grad(set_to_none=True)
+                    with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=amp_enabled):
+                        predictions, _ = model(images, weather)
+                        loss = F.huber_loss(predictions, targets, delta=delta)
+                    loss.backward()
+                synchronize_if_needed(device)
+
+                elapsed = max(time.perf_counter() - start, 1e-8)
+                samples_per_second = float((batch_size * probe_iters) / elapsed)
+                print(f"[autotune] batch_size={batch_size} throughput={samples_per_second:.2f} samples/s")
+                found_valid_candidate = True
+                if (samples_per_second > best_samples_per_second * 1.01) or (
+                    abs(samples_per_second - best_samples_per_second) <= 1e-6 and batch_size > best_batch_size
+                ):
+                    best_batch_size = batch_size
+                    best_samples_per_second = samples_per_second
+            except RuntimeError as exc:
+                if not is_cuda_oom(exc):
+                    raise
+                print(f"[autotune] batch_size={batch_size} failed with CUDA OOM")
+            finally:
+                model.zero_grad(set_to_none=True)
+                if device.type == "cuda":
+                    torch.cuda.empty_cache()
+    finally:
+        restore_module_training_states(model, original_states)
 
     if not found_valid_candidate:
         raise RuntimeError("Auto batch-size tuning failed: every probe candidate exhausted GPU memory.")
