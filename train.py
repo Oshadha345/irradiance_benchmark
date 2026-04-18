@@ -79,7 +79,14 @@ def maybe_compile(model: nn.Module, enabled: bool) -> nn.Module:
     return model
 
 
+def canonicalize_device(device: torch.device) -> torch.device:
+    if device.type != "cuda" or device.index is not None:
+        return device
+    return torch.device(f"cuda:{torch.cuda.current_device()}")
+
+
 def synchronize_if_needed(device: torch.device) -> None:
+    device = canonicalize_device(device)
     if device.type == "cuda":
         torch.cuda.synchronize(device)
 
@@ -128,6 +135,7 @@ def _next_power_of_two(value: int) -> int:
 
 
 def memory_aware_batch_probe_max(device: torch.device, config: Dict[str, Any]) -> int:
+    device = canonicalize_device(device)
     family = str(config["visual"].get("family", "timm")).lower()
     scale = str(config["visual"].get("scale", config["visual"].get("name", "tiny"))).lower()
     base_max = default_batch_probe_max(config)
@@ -197,12 +205,25 @@ def build_batch_size_candidates(config: Dict[str, Any], requested_batch_size: in
     return normalized
 
 
+def required_batch_probe_headroom_bytes(device: torch.device, config: Dict[str, Any]) -> int:
+    device = canonicalize_device(device)
+    if device.type != "cuda":
+        return 0
+
+    train_cfg = config["training"]
+    absolute_gib = float(train_cfg.get("batch_size_probe_headroom_gib", 0.5))
+    relative_ratio = float(train_cfg.get("batch_size_probe_headroom_ratio", 0.03))
+    total_bytes = int(torch.cuda.get_device_properties(device).total_memory)
+    return max(int(absolute_gib * (1024**3)), int(total_bytes * relative_ratio))
+
+
 def autotune_batch_size(
     model: nn.Module,
     device: torch.device,
     config: Dict[str, Any],
     requested_batch_size: int,
 ) -> int:
+    device = canonicalize_device(device)
     if device.type != "cuda":
         return requested_batch_size
 
@@ -215,6 +236,7 @@ def autotune_batch_size(
     temporal_channels = int(config["model"].get("temporal_channels", 7))
     delta = float(train_cfg.get("huber_delta", 1.0))
     candidates = build_batch_size_candidates(config, requested_batch_size, device=device)
+    required_headroom_bytes = required_batch_probe_headroom_bytes(device, config)
 
     best_batch_size = requested_batch_size
     best_samples_per_second = -1.0
@@ -227,6 +249,7 @@ def autotune_batch_size(
             try:
                 torch.cuda.empty_cache()
                 synchronize_if_needed(device)
+                torch.cuda.reset_peak_memory_stats(device)
                 images = torch.randn(batch_size, 3, image_size, image_size, device=device)
                 weather = torch.randn(batch_size, sequence_length, temporal_channels, device=device)
                 targets = torch.randn(batch_size, 1, device=device)
@@ -250,7 +273,21 @@ def autotune_batch_size(
 
                 elapsed = max(time.perf_counter() - start, 1e-8)
                 samples_per_second = float((batch_size * probe_iters) / elapsed)
-                print(f"[autotune] batch_size={batch_size} throughput={samples_per_second:.2f} samples/s")
+                free_bytes, _ = torch.cuda.mem_get_info(device)
+                peak_reserved_bytes = int(torch.cuda.max_memory_reserved(device))
+                free_headroom_gib = free_bytes / float(1024**3)
+                peak_reserved_gib = peak_reserved_bytes / float(1024**3)
+                if required_headroom_bytes and free_bytes < required_headroom_bytes:
+                    required_headroom_gib = required_headroom_bytes / float(1024**3)
+                    print(
+                        f"[autotune] batch_size={batch_size} rejected: "
+                        f"free_headroom_gib={free_headroom_gib:.2f} < required={required_headroom_gib:.2f}"
+                    )
+                    continue
+                print(
+                    f"[autotune] batch_size={batch_size} throughput={samples_per_second:.2f} samples/s "
+                    f"free_headroom_gib={free_headroom_gib:.2f} peak_reserved_gib={peak_reserved_gib:.2f}"
+                )
                 found_valid_candidate = True
                 if (samples_per_second > best_samples_per_second * 1.01) or (
                     abs(samples_per_second - best_samples_per_second) <= 1e-6 and batch_size > best_batch_size
@@ -281,6 +318,58 @@ def select_primary_horizon(targets: torch.Tensor) -> torch.Tensor:
     return targets[:, :1]
 
 
+def run_training_step(
+    *,
+    model: nn.Module,
+    batch: tuple[Any, ...],
+    device: torch.device,
+    criterion: nn.Module,
+    optimizer: torch.optim.Optimizer,
+    scaler: torch.amp.GradScaler,
+    amp_enabled: bool,
+    grad_accum_steps: int,
+    should_step: bool,
+    grad_clip: float,
+    epoch_index: int,
+    step_index: int,
+) -> float | None:
+    device = canonicalize_device(device)
+    batch_size = int(batch[0].shape[0]) if batch and hasattr(batch[0], "shape") else -1
+    try:
+        images, weather_seq, targets = batch[:3]
+        targets = select_primary_horizon(targets)
+
+        with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=amp_enabled):
+            predictions, _ = model(images, weather_seq)
+            loss = criterion(predictions, targets)
+            loss = loss / grad_accum_steps
+
+        if not torch.isfinite(loss).all():
+            optimizer.zero_grad(set_to_none=True)
+            if device.type == "cuda":
+                torch.cuda.empty_cache()
+            return None
+
+        scaler.scale(loss).backward()
+        if should_step:
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad(set_to_none=True)
+
+        return float(loss.detach().item() * grad_accum_steps)
+    except RuntimeError as exc:
+        if not is_cuda_oom(exc):
+            raise
+        optimizer.zero_grad(set_to_none=True)
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+        raise RuntimeError(
+            f"CUDA OOM at epoch={epoch_index} step={step_index} batch_size={batch_size}"
+        ) from exc
+
+
 def main() -> None:
     args = parse_args()
     config = load_config(args.config)
@@ -290,7 +379,7 @@ def main() -> None:
     config["model"]["horizons"] = [int(list(config["model"].get("horizons", [10]))[0])]
 
     device_name = args.device or config.get("device") or ("cuda" if torch.cuda.is_available() else "cpu")
-    device = torch.device(device_name)
+    device = canonicalize_device(torch.device(device_name))
     enable_fast_runtime_paths(device)
 
     model = build_model(config).to(device)
@@ -333,6 +422,7 @@ def main() -> None:
     patience = int(config["training"].get("early_stop_patience", 15))
     min_epochs = int(config["training"].get("min_epochs", 1))
     early_stop_min_delta = float(config["training"].get("early_stop_min_delta", 0.0))
+    grad_clip = float(config["training"].get("grad_clip", 5.0))
     max_total_train_seconds = config["training"].get("max_total_train_seconds")
     max_epoch_seconds = config["training"].get("max_epoch_seconds")
     max_total_train_seconds = None if max_total_train_seconds is None else float(max_total_train_seconds)
@@ -371,29 +461,28 @@ def main() -> None:
         progress = tqdm(train_loader, desc=f"Epoch {epoch + 1}/{epochs} [train]")
         for step, batch in enumerate(progress, start=1):
             batch = tuple(item.to(device, non_blocking=True) if hasattr(item, "to") else item for item in batch)
-            images, weather_seq, targets = batch[:3]
-            targets = select_primary_horizon(targets)
+            loss_value = run_training_step(
+                model=model,
+                batch=batch,
+                device=device,
+                criterion=criterion,
+                optimizer=optimizer,
+                scaler=scaler,
+                amp_enabled=amp_enabled,
+                grad_accum_steps=grad_accum_steps,
+                should_step=(step % grad_accum_steps == 0) or (step == len(train_loader)),
+                grad_clip=grad_clip,
+                epoch_index=epoch + 1,
+                step_index=step,
+            )
 
-            with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=amp_enabled):
-                predictions, aux_prediction = model(images, weather_seq)
-                loss = criterion(predictions, targets)
-                loss = loss / grad_accum_steps
-
-            if not torch.isfinite(loss):
+            if loss_value is None:
                 print(f"[warn] skipping non-finite loss at epoch={epoch + 1} step={step}")
-                optimizer.zero_grad(set_to_none=True)
+                progress.set_postfix({"loss": "non-finite"})
                 continue
 
-            scaler.scale(loss).backward()
-            if (step % grad_accum_steps == 0) or (step == len(train_loader)):
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=float(config["training"].get("grad_clip", 5.0)))
-                scaler.step(optimizer)
-                scaler.update()
-                optimizer.zero_grad(set_to_none=True)
-
-            epoch_loss += float(loss.item() * grad_accum_steps)
-            progress.set_postfix({"loss": f"{loss.item() * grad_accum_steps:.4f}"})
+            epoch_loss += loss_value
+            progress.set_postfix({"loss": f"{loss_value:.4f}"})
 
         scheduler.step()
         train_loss = epoch_loss / max(len(train_loader), 1)
